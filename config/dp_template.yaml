@@ -1,0 +1,14 @@
+# Configuration for data processing
+# ==Metadata==
+
+# ==Data Processing==
+dp:
+
+  # ==CV Scheme==
+cv:
+    scheme: kf
+    n_folds: 5
+    random_state: 42
+
+# ==Dataset==
+dataset:
