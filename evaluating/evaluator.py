@@ -24,6 +24,7 @@ class Evaluator(object):
     """
 
     eval_metrics: Dict[str, Callable[..., Union[float]]] = {}
+    EPS: float = 1e-6
 
     def __init__(self, metric_names: List[str]) -> None:
         self.metric_names = metric_names
@@ -62,10 +63,16 @@ class Evaluator(object):
     def _build(self) -> None:
         """Build evaluation metric instances."""
         for metric_name in self.metric_names:
+            # ==Ranking==
             if metric_name == "one_minus_slowdown":
                 self.eval_metrics[metric_name] = self._one_minus_slowdown_at_k
             elif metric_name == "ndcg":
                 self.eval_metrics[metric_name] = self._ndcg_at_k  # type: ignore
+            elif metric_name == "opa":
+                self.eval_metrics[metric_name] = self._opa
+            elif metric_name == "kendall_tau":
+                self.eval_metrics[metric_name] = self._kendall_tau
+            # ==Regression==
             elif metric_name == "rmse":
                 self.eval_metrics[metric_name] = self._RMSE
             elif metric_name == "mae":
@@ -196,20 +203,72 @@ class Evaluator(object):
 
         return ndcg_at_k
 
-    def _OPA(self, y_pred: Tensor, y_true: np.ndarray) -> float:
+    def _opa(self, y_pred: Tensor, y_true: np.ndarray) -> float:
         """Ordered pair accuracy.
-
-        See https://github.com/tensorflow.
 
         Parameters:
             y_pred: predicting results
             y_true: groudtruths
 
         Return:
-            opa: ordered pair accuracy.
+            opa: ordered pair accuracy
         """
-        opa = 0.0
+        n_samples, n_configs = y_true.shape  # (b, c)
+        n_concords, n_discords = self._cal_condord_discord(y_pred, y_true)
+        opa = torch.mean(n_concords / (n_concords + n_discords + self.EPS)).item()
+        # i_idx = torch.arange(n_configs).repeat(n_configs)
+        # j_idx = torch.arange(n_configs).repeat_interleave(n_configs)
+        # pairwise_y_true = y_true[:, i_idx] > y_true[:, j_idx]
+        # pairwise_y_pred = y_pred[:, i_idx] > y_pred[:, j_idx]
+        # numer = torch.sum(pairwise_y_pred & pairwise_y_true, dim=1)
+        # denom = torch.sum(pairwise_y_true, dim=1)
+        # assert len(numer) == n_samples and len(numer) == len(denom), "#Samples isn't aligned for _opa."
+        # opa = torch.mean(numer / denom)
+
         return opa
+
+    def _kendall_tau(self, y_pred: Tensor, y_true: np.ndarray) -> float:
+        """Kendall tau correlation.
+
+        Parameters:
+            y_pred: predicting results
+            y_true: groudtruths
+
+        Return:
+            kendall_tau: kendall tau correlation
+        """
+        n_samples, n_configs = y_true.shape  # (b, c)
+        n_concords, n_discords = self._cal_condord_discord(y_pred, y_true)
+        kendall_tau = torch.mean((n_concords - n_discords) / (n_concords + n_discords + self.EPS)).item()
+
+        return kendall_tau
+
+    def _cal_condord_discord(self, y_pred: Tensor, y_true: Tensor) -> Tuple[Tensor, Tensor]:
+        """Calculate number of concordant and discordant pairs.
+
+        For pairwise comparison in the matrix form, we know that -A == A.T,
+        so we only need to consider one of the triangle.
+
+        Return:
+            n_concords: number of concardant pairs
+            n_discords: number of discordant pairs
+
+        Shape:
+            y_pred: (B, C), where C denotes the number of configurations
+            y_true: (B, C)
+            n_concords: (B, )
+            n_discords: (B, )
+        """
+        # Item is configuration in this case
+        n_items = y_true.shape[1]
+
+        tril_mask = torch.ones((n_items, n_items), device=y_true.device).tril(diagonal=-1)
+        pairwise_y_true_diff = y_true.unsqueeze(dim=-1) - y_true.unsqueeze(dim=1)
+        pairwise_y_pred_diff = y_pred.unsqueeze(dim=-1) - y_pred.unsqueeze(dim=1)
+        n_concords = (((pairwise_y_true_diff * pairwise_y_pred_diff) > 0) * tril_mask).sum(dim=[1, 2])
+        n_discords = (((pairwise_y_true_diff * pairwise_y_pred_diff) < 0) * tril_mask).sum(dim=[1, 2])
+
+        return n_concords, n_discords
 
     # Regression metrics
     def _RMSE(self, y_pred: Tensor, y_true: Tensor) -> float:

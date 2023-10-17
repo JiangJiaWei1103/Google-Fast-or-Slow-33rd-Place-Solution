@@ -12,8 +12,8 @@ from typing import Any, Optional, Tuple
 import pandas as pd
 from torch.utils.data import DataLoader
 
-from .collate import tile_collate
-from .dataset import TileDataset
+from .collate import tile_collate  # , tile_collate2
+from .dataset import LayoutDataset, TileDataset
 
 
 def build_dataloaders(
@@ -60,3 +60,45 @@ def build_dataloaders(
         return train_loader, eval_loader
     else:
         return train_loader, None
+
+
+from torch_geometric.loader.dataloader import DataLoader  # noqa
+
+
+def build_layout_dataloaders(
+    coll: str,
+    test: bool,
+    batch_size: int,
+    shuffle: bool,
+    num_workers: int,
+    **dataset_cfg: Any,
+) -> Tuple[DataLoader, Optional[DataLoader]]:
+    """Create and return train and validation data loaders.
+
+    Parameters:
+        coll: data collection with the pattern src-search
+        test: if True, eval_loader becomes test_loader
+        batch_size: number of samples per batch
+        shuffle: whether to shuffle samples every epoch
+        num_workers: number of subprocesses used to load data
+        dataset_cfg: hyperparameters of customized dataset
+
+    Return:
+        train_loader: training data loader
+        eval_loader: evaluation data loader
+    """
+    train_loader = DataLoader(
+        LayoutDataset(**{**dataset_cfg, "coll": f"{coll}-train"}),  # type: ignore
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+    )
+    split = "valid" if not test else "test"
+    eval_loader = DataLoader(
+        LayoutDataset(**{**dataset_cfg, "coll": f"{coll}-{split}"}),  # type: ignore
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+    )
+
+    return train_loader, eval_loader

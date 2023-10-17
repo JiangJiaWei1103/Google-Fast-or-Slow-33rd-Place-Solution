@@ -16,4 +16,7 @@ COLL = ["layout-nlp-default", "layout-nlp-random", "layout-xla-default", "layout
 
 # ====
 # Number of unique op-codes
+NODE_FEAT_DIM = 86  # 101 #140
+CONFIG_FEAT_DIM = 24
+NODE_CONFIG_FEAT_DIM = 18
 N_OPS = 120

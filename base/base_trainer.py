@@ -34,6 +34,7 @@ class BaseTrainer:
         loss_fn: loss criterion
         optimizer: optimization algorithm
         lr_skd: learning rate scheduler
+        ckpt_path: path to save model checkpoints
         es: early stopping tracker
         evaluator: task-specific evaluator
         use_wandb: if True, training and evaluation processes are
@@ -70,6 +71,7 @@ class BaseTrainer:
 
         self.device = proc_cfg["device"]
         self.epochs = proc_cfg["epochs"]
+        self.step_per_batch = proc_cfg["solver"]["lr_skd"]["step_per_batch"]
 
         # Model checkpoint
         self.model_ckpt = ModelCheckpoint(ckpt_path, **proc_cfg["model_ckpt"])
@@ -94,13 +96,11 @@ class BaseTrainer:
             val_loss, val_result, _ = self._eval_epoch(datatype="val")
 
             # Adjust learning rate
-            #            if self.lr_skd is not None:
-            #                if isinstance(self.lr_skd, lr_scheduler.ReduceLROnPlateau):
-            #                    self.lr_skd.step(val_loss)
-            #                else:
-            #                    self.lr_skd.step()
-            #
-            print("LR:", self.lr_skd.get_last_lr())
+            if not self.step_per_batch and self.lr_skd is not None:
+                if isinstance(self.lr_skd, lr_scheduler.ReduceLROnPlateau):
+                    self.lr_skd.step(val_loss)
+                else:
+                    self.lr_skd.step()
 
             # Track and log process result (by epoch)
             self._log_proc(epoch, train_loss, val_loss, val_result)

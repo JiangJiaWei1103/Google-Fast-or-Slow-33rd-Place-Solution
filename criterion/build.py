@@ -10,7 +10,7 @@ from typing import Any, Optional
 import torch.nn as nn
 from torch.nn.modules.loss import _Loss
 
-from .custom import ListMLE, MultiElementRankLoss
+from .custom import ListMLE, MultiElementRankLoss, PairwiseHingeLoss
 
 
 def build_criterion(**loss_params: Any) -> Optional[_Loss]:
@@ -35,6 +35,8 @@ def build_criterion(**loss_params: Any) -> Optional[_Loss]:
         criterion = nn.L1Loss()
     elif loss_fn == "l2":
         criterion = nn.MSELoss()
+    elif loss_fn == "hinge":
+        criterion = PairwiseHingeLoss()
     elif loss_fn == "mulelerank":
         criterion = MultiElementRankLoss()
     elif loss_fn == "listmle":

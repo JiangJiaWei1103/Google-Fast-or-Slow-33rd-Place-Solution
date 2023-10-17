@@ -1,10 +1,17 @@
 # Configuration for data processing
+
+# [ ] Try different norms for regression task
+# [ ]
+
 # ==Metadata==
 
 # ==Data Processing==
 dp:
+    # {"minmax", null}
+    # Currently support scaling node and cfg feat
+    scaling: minmax
 
-  # ==CV Scheme==
+# ==CV Scheme==
 cv:
     scheme: kf
     n_folds: 5
@@ -12,3 +19,9 @@ cv:
 
 # ==Dataset==
 dataset:
+    # {"target", "target_norm"}
+    # Select "target_norm" for regression loss
+    target_col: target_norm
+
+    # For layout only
+    max_seg_size: 1000
