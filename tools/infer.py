@@ -10,6 +10,7 @@ import warnings
 from argparse import Namespace
 from typing import List
 
+import numpy as np
 import pandas as pd
 import torch
 from torch import Tensor
@@ -68,6 +69,19 @@ def _run_infer(models: List[Module], dataloader: DataLoader) -> List[Tensor]:
     return y_pred
 
 
+def _gen_sub(data: pd.DataFrame, top_configs: List[str]) -> pd.DataFrame:
+    """Generate submission."""
+    sub = pd.read_csv("data/raw/sample_submission.csv")
+    data["pred"] = top_configs
+    data["ID"] = data["file"].apply(lambda x: "tile:xla:" + x.split(".")[0])
+    sub = sub.merge(data[["ID", "pred"]], on="ID", how="left")
+    tile_mask = ~sub["pred"].isna()
+    sub.loc[tile_mask, "TopConfigs"] = sub.loc[tile_mask, "pred"]
+    sub.drop("pred", axis=1, inplace=True)
+
+    return sub
+
+
 def main(args: Namespace) -> None:
     """Run training and evaluation processes.
 
@@ -104,18 +118,29 @@ def main(args: Namespace) -> None:
         # Run inference
         exp.log(f"== Inference Process on {data_split.upper()} ==")
         y_pred = _run_infer(models, dataloader)
+        y_pred = torch.cat(y_pred, dim=-1)
 
         # Run evaluation
         if data_split != "test":
             y_true = dataloader.dataset.data["target"].values
-            y_pred = torch.cat(y_pred, dim=-1)
             evaluator = build_evaluator(**exp.proc_cfg["evaluator"])
             eval_result = evaluator.evaluate(y_true, y_pred, None)
             exp.log(">>>>> Performance Report - Ckpt {mid} <<<<<")
             exp.log(json.dumps({data_split: eval_result}, indent=4))
         else:
-            # Structure prediction to fit submission
-            pass
+            n_configs = data["config_feat"].apply(lambda x: len(x)).values
+            ch, ct = 0, None
+            top_configs = []
+            for n in n_configs:
+                ct = ch + n
+                y_pred_i = y_pred[ch:ct].numpy()
+                ch = ct
+
+                top_configs_i = np.argsort(y_pred_i)[:5]
+                top_configs.append(";".join(top_configs_i.astype(str)))
+
+            sub = _gen_sub(data, top_configs)
+            exp.dump_df(sub, "submission.csv")
 
 
 if __name__ == "__main__":

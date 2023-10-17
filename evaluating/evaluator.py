@@ -12,8 +12,6 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from criterion.custom import MaskedLoss
-
 
 class Evaluator(object):
     """Custom evaluator.
@@ -78,12 +76,6 @@ class Evaluator(object):
                 self.eval_metrics[metric_name] = self._RAE
             elif metric_name == "corr":
                 self.eval_metrics[metric_name] = self._CORR
-            elif metric_name == "mmae":
-                self.eval_metrics[metric_name] = self._MMAE
-            elif metric_name == "mrmse":
-                self.eval_metrics[metric_name] = self._MRMSE
-            elif metric_name == "mmape":
-                self.eval_metrics[metric_name] = self._MMAPE
 
     def _rescale_y(self, y_pred: Tensor, y_true: Tensor, scaler: Any) -> Tuple[Tensor, Tensor]:
         """Rescale y to the original scale.
@@ -204,6 +196,21 @@ class Evaluator(object):
 
         return ndcg_at_k
 
+    def _OPA(self, y_pred: Tensor, y_true: np.ndarray) -> float:
+        """Ordered pair accuracy.
+
+        See https://github.com/tensorflow.
+
+        Parameters:
+            y_pred: predicting results
+            y_true: groudtruths
+
+        Return:
+            opa: ordered pair accuracy.
+        """
+        opa = 0.0
+        return opa
+
     # Regression metrics
     def _RMSE(self, y_pred: Tensor, y_true: Tensor) -> float:
         """Root mean squared error.
@@ -302,45 +309,3 @@ class Evaluator(object):
         corr = torch.mean(corr_per_ts[idx_leg]).item()  # Take mean across time series
 
         return corr
-
-    def _MMAE(self, y_pred: Tensor, y_true: Tensor) -> float:
-        """Masked mean absolute error.
-
-        Parameters:
-            y_pred: predicting results
-            y_true: groudtruths
-
-        Return:
-            mmae: masked mean absolute error
-        """
-        mmae = MaskedLoss("l1")(y_pred, y_true).item()
-
-        return mmae
-
-    def _MRMSE(self, y_pred: Tensor, y_true: Tensor) -> float:
-        """Masked root mean square error.
-
-        Parameters:
-            y_pred: predicting results
-            y_true: groudtruths
-
-        Return:
-            mrmse: masked root mean square error
-        """
-        mrmse = torch.sqrt(MaskedLoss("l2")(y_pred, y_true)).item()
-
-        return mrmse
-
-    def _MMAPE(self, y_pred: Tensor, y_true: Tensor) -> float:
-        """Masked mean absolute percentage error.
-
-        Parameters:
-            y_pred: predicting results
-            y_true: groudtruths
-
-        Return:
-            mmape: masked mean absolute percentage error
-        """
-        mmape = MaskedLoss("mape")(y_pred, y_true).item()
-
-        return mmape

@@ -10,7 +10,7 @@ from typing import Any, Optional
 import torch.nn as nn
 from torch.nn.modules.loss import _Loss
 
-from .custom import MaskedLoss
+from .custom import ListMLE, MultiElementRankLoss
 
 
 def build_criterion(**loss_params: Any) -> Optional[_Loss]:
@@ -35,18 +35,13 @@ def build_criterion(**loss_params: Any) -> Optional[_Loss]:
         criterion = nn.L1Loss()
     elif loss_fn == "l2":
         criterion = nn.MSELoss()
+    elif loss_fn == "mulelerank":
+        criterion = MultiElementRankLoss()
+    elif loss_fn == "listmle":
+        criterion = ListMLE()
     elif loss_fn == "mtk":
         print("Loss criterion default building is disabled...")
         criterion = None
-    elif loss_fn == "ml1":
-        # Masked MAE
-        criterion = MaskedLoss("l1")
-    elif loss_fn == "ml2":
-        # Masked MSE
-        criterion = MaskedLoss("l2")
-    elif loss_fn == "mmape":
-        # Masked MAPE
-        criterion = MaskedLoss("mape")
     else:
         raise RuntimeError(f"Loss criterion {loss_fn} isn't registered...")
 

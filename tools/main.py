@@ -16,19 +16,17 @@ import os
 import warnings
 from argparse import Namespace
 
-import pandas as pd
-from transformers import get_cosine_schedule_with_warmup
-
 import wandb
 from base.base_trainer import BaseTrainer
 from criterion.build import build_criterion
 from cv.build import build_cv
 from data.build import build_dataloaders
+from data.data_processor import DataProcessor
 from engine.defaults import TrainEvalArgParser
 from evaluating.build import build_evaluator
 from experiment.experiment import Experiment
 from modeling.build import build_model
-from solver.build import build_optimizer
+from solver.build import build_lr_scheduler, build_optimizer
 from trainer.trainer import MainTrainer
 from utils.common import count_params
 from utils.early_stopping import EarlyStopping
@@ -52,7 +50,9 @@ def main(args: Namespace) -> None:
         exp.dump_cfg(exp.cfg, "cfg")
 
         # Prepare data
-        data = pd.read_pickle("./data/processed/tile/xla/train.pkl")
+        dp = DataProcessor(**exp.dp_cfg["dp"])
+        dp.run_before_splitting()
+        data = dp.get_data_cv()
 
         # Run CV
         cv = build_cv(**exp.dp_cfg["cv"])
@@ -69,7 +69,7 @@ def main(args: Namespace) -> None:
 
             # Build dataloaders
             data_tr, data_val = data.iloc[tr_idx].reset_index(drop=True), data.iloc[val_idx].reset_index(drop=True)
-            scaler = None
+            data_tr, data_val, scalers = dp.run_after_splitting(data_tr, data_val)
             train_loader, val_loader = build_dataloaders(
                 data_tr,
                 data_val,
@@ -89,9 +89,13 @@ def main(args: Namespace) -> None:
 
             # Build solvers
             optimizer = build_optimizer(model, **exp.proc_cfg)
-            n_train_steps = math.ceil(len(data_tr) / exp.proc_cfg["dataloader"]["batch_size"]) * exp.proc_cfg["epochs"]
-            lr_skd = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=n_train_steps)
-            # lr_skd = build_lr_scheduler(optimizer, **exp.proc_cfg)
+            # ===
+            # Note grad accum case
+            num_training_stepes = (
+                math.ceil(len(train_loader) / exp.proc_cfg["dataloader"]["batch_size"]) * exp.proc_cfg["epochs"]
+            )
+            # ===
+            lr_skd = build_lr_scheduler(optimizer, num_training_stepes, **exp.proc_cfg)
 
             # Build early stopping tracker
             if exp.proc_cfg["es"]["patience"] != 0:
@@ -117,7 +121,7 @@ def main(args: Namespace) -> None:
                 "evaluator": evaluator,
                 "train_loader": train_loader,
                 "eval_loader": val_loader,
-                "scaler": scaler,
+                "scaler": None,  # scaler,
                 "use_wandb": args.use_wandb,
             }
             trainer = MainTrainer(**trainer_cfg)
@@ -127,8 +131,7 @@ def main(args: Namespace) -> None:
 
             # Run evaluation on unseen test set
             if args.eval_on_test:
-                # data_test = dp.get_data_test()
-                data_test = pd.read_pickle("./data/processed/tile/xla/valid.pkl")
+                data_test = dp.get_data_test()
                 _, test_loader = build_dataloaders(
                     data_tr,
                     data_test,
@@ -141,7 +144,8 @@ def main(args: Namespace) -> None:
 
             # Dump output objects
             # Use args to control whether to dump the preds of diff datasets
-            # exp.dump_trafo(scaler, f"fold{i}")
+            if scalers is not None:
+                exp.dump_trafo(scalers, f"fold{fold}")
             for model_file in os.listdir(ckpt_path):
                 if "fold" in model_file:
                     continue
