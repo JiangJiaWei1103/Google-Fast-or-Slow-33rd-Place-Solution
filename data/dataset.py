@@ -18,7 +18,7 @@ from torch.utils.data import Dataset
 from torch_geometric.data.data import BaseData, Data
 
 from metadata import NODE_CONFIG_FEAT_DIM
-from paths import RAW_DATA_PATH
+from paths import PROC_DATA_PATH
 
 EPS = 1e-6
 
@@ -87,14 +87,20 @@ class LayoutDataset(Dataset):
         max_seg_size: maximum number of nodes per gragh segment
     """
 
-    LAYOUT_ROOT: str = os.path.join(RAW_DATA_PATH, "npz_all/npz/layout")
+    # LAYOUT_ROOT: str = os.path.join(RAW_DATA_PATH, "npz_all/npz/layout")
+    LAYOUT_ROOT: str = os.path.join(PROC_DATA_PATH, "layout")
 
     def __init__(self, coll: str, max_seg_size: int = 1000, **kwargs: Dict[str, Any]) -> None:
         super().__init__()
 
         self.src, self.search, self.split = coll.split("-")
-        self.data_root = os.path.join(self.LAYOUT_ROOT, f"{self.src}/{self.search}/{self.split}")
-        self._data_files = self._get_data_files()
+        # self.data_root = os.path.join(self.LAYOUT_ROOT, f"{self.src}/{self.search}/{self.split}")
+        # self._data_files = self._get_data_files()
+
+        self.data_root = os.path.join(self.LAYOUT_ROOT, f"{self.src}/{self.search}/")
+        self.data = pd.read_pickle(os.path.join(self.data_root, f"{self.split}.pkl"))
+        self.node_config_feat_root = os.path.join(self.data_root, f"node_config_feat/{self.split}")
+
         self.max_seg_size = max_seg_size
 
     def _get_data_files(self) -> List[str]:
@@ -107,9 +113,58 @@ class LayoutDataset(Dataset):
         return data_files
 
     def __len__(self) -> int:
-        return len(self._data_files)
+        # return len(self._data_files)
+        return len(self.data)
 
     def __getitem__(self, idx: int) -> BaseData:
+        data_row = self.data.iloc[idx]
+        node_config_feat = np.load(os.path.join(self.node_config_feat_root, data_row["file"]))["node_config_feat"]
+
+        # Parse data fields
+        node_feat = torch.tensor(data_row["node_feat"], dtype=torch.float32)
+        node_opcode = torch.tensor(data_row["node_opcode"], dtype=torch.int32)
+        edge_index = torch.tensor(data_row["edge_index"].T, dtype=torch.long)
+        node_config_feat = torch.tensor(node_config_feat, dtype=torch.float32)
+        node_config_ids = torch.tensor(data_row["node_config_ids"])
+
+        # Derive simple graph stats
+        n_nodes = torch.tensor(node_feat.shape[0], dtype=torch.int32)
+        n_edges = torch.tensor(edge_index.shape[1], dtype=torch.int32)
+        n_configs = torch.tensor(node_config_feat.shape[0], dtype=torch.int32)
+        n_config_nodes = torch.tensor(node_config_feat.shape[1], dtype=torch.int32)
+
+        # Segment the graph
+        seg_ptr = self._segment(n_nodes)
+        n_segs = torch.tensor(len(seg_ptr) - 1, dtype=torch.int32)
+        if idx == 0:
+            hash_head = torch.tensor(0, dtype=torch.int32)
+        else:
+            hash_head = torch.tensor(n_segs * n_configs + (idx - 1), dtype=torch.int32)
+
+        data_sample = Data(
+            node_feat=node_feat,  # (n, 140)
+            node_opcode=node_opcode,  # (n, )
+            edge_index=edge_index,  # (2, m)
+            node_config_feat=node_config_feat.view(-1, NODE_CONFIG_FEAT_DIM),  # (c * nc, 18)
+            node_config_ids=node_config_ids,  # (nc, )
+            n_nodes=n_nodes,  # n
+            n_edges=n_edges,  # m
+            n_configs=n_configs,  # c
+            n_config_nodes=n_config_nodes,  # nc
+            seg_ptr=seg_ptr,
+            n_segs=n_segs,
+            hash_head=hash_head,
+        )
+
+        if self.split != "test":
+            runtime = torch.tensor(data_row["config_runtime"])  # (c, )
+            data_sample.y = np.log1p(runtime)
+            # data_sample.y = runtime
+            # data_sample["target"]: runtime  # (c, )
+
+        return data_sample
+
+    def _getitem_old(self, idx: int) -> BaseData:
         # Load data sample
         layout_tmp = dict(np.load(os.path.join(self.data_root, self._data_files[idx])))
 
