@@ -2,11 +2,11 @@
 # ==Training==
 seed: 168
 device: 'cuda:0'
-epochs: 1
+epochs: 100
 loss_fn:
     # Name of the loss criterion, the choices are as follows:
     #    {'l1', 'l2', 'mtk'}
-    name: 'l1'
+    name: "hinge"
     # Multitask coordination
     mtk:
         # Supervised task
@@ -14,18 +14,30 @@ loss_fn:
         # Regularization
         #ae_recons: 0
         #vq: 0
-    rescale: True
+    rescale: #True
 # Model checkpoint
 model_ckpt:
-    ckpt_metric: null
-    ckpt_mode: null
+    # opa-max follows the paper implementation
+    ckpt_metric: #opa
+    ckpt_mode: #max
     best_ckpt_mid: last
+# ES should be here
+# Graph segment training
+gst:
+    # Configuration sampler
+    config_sampler:
+        n_configs: 32
+        include_extremes: False  # Random now
+    # Historical embedding table
+    hetable:
+        num_embeddings: 60000000
+        embedding_dim: 1  # if 1, caching runtime seg-config pair
 
 # ==DataLoader==
 dataloader:
-    batch_size: 128
+    batch_size: 8 #32
     shuffle: True
-    num_workers: 4
+    num_workers: 0
 
 # ==Solver==
 solver:
@@ -35,7 +47,7 @@ solver:
         # Learning rate
         lr: 0.001
         # Weight decay, default=1e-2 for AdamW
-        weight_decay: 0.0001
+        weight_decay: 0 #0.0001 #0.00001 #0.01 #0.0001
         # ==Ada* series==
         # Term added to the denominator to improve numerical stability
         eps: 1e-8
@@ -59,9 +71,12 @@ solver:
         # Enable Nesterov momentum
         nesterov: null
 
+        # Gradient accumulation
+        grad_accum_steps: 4
+
     # ==Learning rate scheduler==
     lr_skd:
-        name: plateau
+        name: cos
         milestones: null
         # Multiplicative factor of learning rate decay
         gamma: null
@@ -73,13 +88,16 @@ solver:
         factor: 0.5
         patience: 5
 
+        step_per_batch: True
+
 # ==Early Stopping==
 es:
-    patience: 10
-    mode: 'min'
+    patience: 0
+    mode: null # 'min'
 
 # ==Evaluator==
 evaluator:
     # Evaluation metrics, the choices are as follows:
-    #     {'mae', 'rmse', 'rae', 'rrse', 'corr', 'mmae', 'mrmse', 'mmape'}
-    eval_metrics: ["one_minus_slowdown", "ndcg"]
+    #     {"one_minus_slowdown", "ndcg" (support k = 10 now), "opa", "kendall_tau"}
+    # eval_metrics: ["opa", one_minus_slowdown", "ndcg"]
+    eval_metrics: ["opa", "kendall_tau"]

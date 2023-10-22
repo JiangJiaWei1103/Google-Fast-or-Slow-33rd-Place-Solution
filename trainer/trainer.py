@@ -10,6 +10,9 @@ inherited from `BaseTrainer`.
 * [ ] Clarify grad accumulation w/ clipping.
 * [ ] Grad accumulation with drop_last or updating with the remaining
     samples.
+
+* [ ] Periodically update HET by running forward on all segment-config
+    pairs.
 """
 import copy
 import gc
@@ -272,10 +275,11 @@ class GSTrainer(BaseTrainer):
         self.grad_accum_steps = proc_cfg["solver"]["optimizer"]["grad_accum_steps"]
 
         # Configuration sampler
-        self.config_sampler = _ConfigSampler(n_configs=32, include_extremes=True)
+        self.config_sampler = _ConfigSampler(**proc_cfg["gst"]["config_sampler"])
 
         # Historical embedding table
-        self.hetable = HistoryEmbTable(int(6e7), 1, self.device)
+        hetable_params = proc_cfg["gst"]["hetable"]
+        self.hetable = HistoryEmbTable(hetable_params["num_embeddings"], hetable_params["embedding_dim"], self.device)
 
     def _train_epoch(self) -> float:
         """Run training process for one epoch.
@@ -314,6 +318,12 @@ class GSTrainer(BaseTrainer):
 
             if (i + 1) % self.grad_accum_steps == 0 or i + 1 == len(self.train_loader):
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1e-2)  # 1.0)
+                # total_norm = 0
+                # for p in self.model.parameters():
+                #    param_norm = p.grad.data.norm(2)
+                #    total_norm += param_norm.item() ** 2
+                # total_norm = total_norm ** (1. / 2)
+                # print(f"Grad norm: {total_norm}")
                 self.optimizer.step()
                 if self.step_per_batch:
                     self.lr_skd.step()
@@ -356,7 +366,7 @@ class GSTrainer(BaseTrainer):
         y_true, y_pred = None, None
 
         self.model.eval()
-        self.profiler.start(proc_type=datatype)
+        # self.profiler.start(proc_type=datatype)
         for i, batch_data in enumerate(self.eval_loader):
             batch_data, _ = self.config_sampler.sample(batch_data)
             y = batch_data.y.to(self.device)
@@ -386,7 +396,7 @@ class GSTrainer(BaseTrainer):
                 y_true = torch.cat([y_true, y.detach().cpu()], dim=0)
                 y_pred = torch.cat([y_pred, output.detach().cpu()], dim=0)
 
-        self.profiler.stop(record=True if datatype != "train" else False)
+        # self.profiler.stop(record=True if datatype != "train" else False)
         eval_loss_avg = eval_loss_total / len(self.eval_loader)
         eval_result = self.evaluator.evaluate(y_true, y_pred, self.scaler)
 
