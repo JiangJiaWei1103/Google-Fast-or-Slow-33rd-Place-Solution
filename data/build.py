@@ -87,12 +87,15 @@ def build_layout_dataloaders(
         train_loader: training data loader
         eval_loader: evaluation data loader
     """
-    train_loader = DataLoader(
-        LayoutDataset(**{**dataset_cfg, "coll": f"{coll}-train"}),  # type: ignore
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-    )
+    if not test:
+        train_loader = DataLoader(
+            LayoutDataset(**{**dataset_cfg, "coll": f"{coll}-train"}),  # type: ignore
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+        )
+    else:
+        train_loader = None
     split = "valid" if not test else "test"
     eval_loader = DataLoader(
         LayoutDataset(**{**dataset_cfg, "coll": f"{coll}-{split}"}),  # type: ignore

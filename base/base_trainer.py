@@ -129,6 +129,24 @@ class BaseTrainer:
 
         return best_model, y_preds
 
+    def eval(self, proc_id: int, eval_loader: DataLoader, datatype: str) -> Optional[Tensor]:
+        """Run evaluation process on the specified dataset.
+
+        Parameters:
+            proc_id:
+            eval_loader: dataloader for evaluation
+            datatype: type of the dataset to evaluate
+
+        Return:
+            None
+        """
+        self.eval_loader = eval_loader
+        _, eval_result, y_pred = self._eval_epoch(return_output=True)
+        prf_report = {datatype: eval_result}
+        self._log_best_prf(prf_report)
+
+        return None
+
     def test(self, proc_id: int, test_loader: DataLoader) -> Tensor:
         """Run evaluation process on unseen test data using the
         designated model checkpoint.
