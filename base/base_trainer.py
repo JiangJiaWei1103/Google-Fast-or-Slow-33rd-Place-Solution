@@ -276,7 +276,7 @@ class BaseTrainer:
         """Disable shuffle in train dataloader for final evaluation."""
         self.train_loader = DataLoader(
             self.train_loader.dataset,
-            batch_size=self.train_loader.batch_size,
+            batch_size=1,  # self.train_loader.batch_size,
             shuffle=False,  # Reset shuffle to False
             num_workers=self.train_loader.num_workers,
             collate_fn=self.train_loader.collate_fn,
