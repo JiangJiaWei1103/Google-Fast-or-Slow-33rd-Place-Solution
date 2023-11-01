@@ -1,6 +1,6 @@
 # Common configuration for training and evaluation processes
 # ==Training==
-seed: 168
+seed: 3407
 device: 'cuda:0'
 epochs: 100
 loss_fn:
@@ -18,24 +18,22 @@ loss_fn:
 # Model checkpoint
 model_ckpt:
     # opa-max follows the paper implementation
-    ckpt_metric: #opa
-    ckpt_mode: #max
+    ckpt_metric: opa
+    ckpt_mode: max
     best_ckpt_mid: last
 # ES should be here
 # Graph segment training
 gst:
     # Configuration sampler
     config_sampler:
-        n_configs: 32
-        include_extremes: False  # Random now
+        n_configs: 200   # 32 too random``
+        include_extremes: False # True Seems too optimistic
     # Historical embedding table
-    hetable:
-        num_embeddings: 60000000
-        embedding_dim: 1  # if 1, caching runtime seg-config pair
+    hetable: null
 
 # ==DataLoader==
 dataloader:
-    batch_size: 8 #32
+    batch_size: 2
     shuffle: True
     num_workers: 0
 
@@ -43,11 +41,11 @@ dataloader:
 solver:
     # ==Optimizer==
     optimizer:
-        name: adam
+        name: adamw
         # Learning rate
         lr: 0.001
         # Weight decay, default=1e-2 for AdamW
-        weight_decay: 0 #0.0001 #0.00001 #0.01 #0.0001
+        weight_decay: 0.01 #0.0001 #0.00001 #0.01 #0.0001
         # ==Ada* series==
         # Term added to the denominator to improve numerical stability
         eps: 1e-8
@@ -72,7 +70,7 @@ solver:
         nesterov: null
 
         # Gradient accumulation
-        grad_accum_steps: 4
+        grad_accum_steps: 16
 
     # ==Learning rate scheduler==
     lr_skd:
