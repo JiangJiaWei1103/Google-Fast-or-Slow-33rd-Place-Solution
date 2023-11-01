@@ -108,7 +108,6 @@ class MainTrainer(BaseTrainer):
         train_loss_total = 0
 
         self.model.train()
-        self.profiler.start("train")
         for i, batch_data in enumerate(tqdm(self.train_loader)):
             if i % self.grad_accum_steps == 0:
                 self.optimizer.zero_grad(set_to_none=True)
@@ -153,7 +152,6 @@ class MainTrainer(BaseTrainer):
             del inputs, y, output
             _ = gc.collect()
 
-        self.profiler.stop()
         train_loss_avg = train_loss_total / len(self.train_loader)
 
         return train_loss_avg
@@ -179,7 +177,6 @@ class MainTrainer(BaseTrainer):
         y_pred = []
 
         self.model.eval()
-        self.profiler.start(proc_type=datatype)
         for i, batch_data in enumerate(self.eval_loader):
             # Retrieve batched raw data
             inputs = {}
@@ -205,7 +202,6 @@ class MainTrainer(BaseTrainer):
             del inputs, y, output
             _ = gc.collect()
 
-        self.profiler.stop(record=True if datatype != "train" else False)
         eval_loss_avg = eval_loss_total / len(self.eval_loader)
 
         # Run evaluation with the specified evaluation metrics
@@ -228,7 +224,7 @@ class GSTrainer(BaseTrainer):
         model: model instance
         loss_fn: loss criterion
         optimizer: optimization algorithm
-        lr_scheduler: learning rate scheduler
+        lr_skd: learning rate scheduler
         es: early stopping tracker
         scaler: scaling object
         train_loader: training data loader
@@ -269,17 +265,18 @@ class GSTrainer(BaseTrainer):
         self.eval_loader = eval_loader if eval_loader else train_loader
         self.scaler = scaler
         self.rescale = proc_cfg["loss_fn"]["rescale"]
+        self.grad_accum_steps = proc_cfg["solver"]["optimizer"]["grad_accum_steps"]
 
         self.loss_name = self.loss_fn.__class__.__name__
 
-        self.grad_accum_steps = proc_cfg["solver"]["optimizer"]["grad_accum_steps"]
-
         # Configuration sampler
         self.config_sampler = _ConfigSampler(**proc_cfg["gst"]["config_sampler"])
+        self.config_sampler_eval = _ConfigSampler(
+            n_configs=proc_cfg["gst"]["config_sampler"]["n_configs"], include_extremes=False
+        )
 
         # Historical embedding table
-        hetable_params = proc_cfg["gst"]["hetable"]
-        self.hetable = HistoryEmbTable(hetable_params["num_embeddings"], hetable_params["embedding_dim"], self.device)
+        self.hetable = HistoryEmbTable(self.train_loader.dataset.tot_n_segs)
 
     def _train_epoch(self) -> float:
         """Run training process for one epoch.
@@ -290,7 +287,6 @@ class GSTrainer(BaseTrainer):
         train_loss_total = 0
 
         self.model.train()
-        self.profiler.start("train")
         for i, batch_data in enumerate(tqdm(self.train_loader)):
             if i % self.grad_accum_steps == 0:
                 self.optimizer.zero_grad(set_to_none=True)
@@ -305,25 +301,16 @@ class GSTrainer(BaseTrainer):
             output, x_graph = self.model(batch_to_train, batch_other, batch_n_segs)
 
             # Derive loss
-            output = output.view(-1, self.config_sampler.n_configs)  # (n_graphs, 32)
+            output = output.view(-1, self.config_sampler.n_configs)  # (n_graphs, n_configs)
             y = y.view(-1, self.config_sampler.n_configs)
             loss = self.loss_fn(output, y)
             train_loss_total += loss.item()
             loss = loss / self.grad_accum_steps
 
             # Backpropagation
-            # Clip where ???????????????
             loss.backward()
-            # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1e-3)
-
             if (i + 1) % self.grad_accum_steps == 0 or i + 1 == len(self.train_loader):
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1e-2)  # 1.0)
-                # total_norm = 0
-                # for p in self.model.parameters():
-                #    param_norm = p.grad.data.norm(2)
-                #    total_norm += param_norm.item() ** 2
-                # total_norm = total_norm ** (1. / 2)
-                # print(f"Grad norm: {total_norm}")
                 self.optimizer.step()
                 if self.step_per_batch:
                     self.lr_skd.step()
@@ -334,13 +321,16 @@ class GSTrainer(BaseTrainer):
             seg_embs = x_graph.reshape(-1, n_sampled_configs)
             for b, seg_emb in enumerate(seg_embs):
                 parent_graph = batch_data_list[b]
-                hash_head, n_segs = parent_graph.hash_head.item(), parent_graph.n_segs.item()
+                hash_head = parent_graph.hash_head.item()
                 seg_to_train = segs_to_train[b]
                 for k, seg_emb_entry in enumerate(seg_emb):
-                    hash_idx = hash_head + seg_to_train + batch_sampled_config_idx[b][k] * n_segs
+                    hash_idx = [hash_head + seg_to_train, batch_sampled_config_idx[b][k]]
                     self.hetable.push(seg_emb_entry, hash_idx)
 
-        self.profiler.stop()
+        # Periodically update HistoryEmbTable
+        # Currently for each epoch, update only one batch
+        self._update_hetable()
+
         train_loss_avg = train_loss_total / len(self.train_loader)
 
         return train_loss_avg
@@ -366,26 +356,36 @@ class GSTrainer(BaseTrainer):
         y_true, y_pred = None, None
 
         self.model.eval()
-        # self.profiler.start(proc_type=datatype)
         for i, batch_data in enumerate(self.eval_loader):
-            batch_data, _ = self.config_sampler.sample(batch_data)
+            batch_data, _ = self.config_sampler_eval.sample(batch_data)
             y = batch_data.y.to(self.device)
             batch_to_eval, batch_n_segs, *_ = self._rebatch_by_seg(batch_data, None, train=False)
 
             # Forward pass
-            _, x_graph = self.model(batch_to_eval)  # x_graph as output
+            try:
+                _, x_graph = self.model(batch_to_eval)  # x_graph as output
+            except:
+                x_graph = []
+                n_graphs_tot = batch_to_eval.num_graphs
+                n_graphs_per_run = n_graphs_tot // 40
+                gh, gt = 0, 0
+                while True:
+                    gt = gh + n_graphs_per_run
+                    if gt > n_graphs_tot:
+                        gt = n_graphs_tot
+                    batch_chunk = batch_to_eval[gh:gt]
+                    _, x_graph_chunk = self.model(Batch.from_data_list(batch_chunk))
+                    x_graph.append(x_graph_chunk)
+                    gh = gt
+                    if gt == n_graphs_tot:
+                        break
+                x_graph = torch.cat(x_graph)
 
             # Derive loss
-            y = y.view(-1, self.config_sampler.n_configs).to(self.device)
-            n_sampled_configs = self.config_sampler.n_configs
+            y = y.view(-1, self.config_sampler_eval.n_configs).to(self.device)
+            n_sampled_configs = self.config_sampler_eval.n_configs
             output_seg = x_graph.reshape(-1, n_sampled_configs)
-            batch_n_segs_idx = torch.repeat_interleave(torch.arange(len(batch_n_segs)), torch.tensor(batch_n_segs)).to(
-                y.device
-            )
-            batch_n_segs_idx = batch_n_segs_idx.reshape(-1, 1).expand(-1, n_sampled_configs)
-            output = torch.zeros_like(y, device=y.device, dtype=torch.float32).scatter_add_(
-                0, batch_n_segs_idx, output_seg
-            )
+            output = torch.sum(output_seg, dim=0, keepdim=True)
             loss = self.loss_fn(output, y)
             eval_loss_total += loss.item()
 
@@ -396,7 +396,6 @@ class GSTrainer(BaseTrainer):
                 y_true = torch.cat([y_true, y.detach().cpu()], dim=0)
                 y_pred = torch.cat([y_pred, output.detach().cpu()], dim=0)
 
-        # self.profiler.stop(record=True if datatype != "train" else False)
         eval_loss_avg = eval_loss_total / len(self.eval_loader)
         eval_result = self.evaluator.evaluate(y_true, y_pred, self.scaler)
 
@@ -445,7 +444,8 @@ class GSTrainer(BaseTrainer):
 
                 if train and j != seg_to_train:
                     for k in range(self.config_sampler.n_configs):
-                        hash_idx = g.hash_head.item() + n_segs * batch_sampled_config_idx[i][k].item() + j
+                        # hash_idx = g.hash_head.item() + n_segs * batch_sampled_config_idx[i][k].item() + j
+                        hash_idx = [g.hash_head.item() + j, batch_sampled_config_idx[i][k]]
                         batch_other.append(self.hetable.pull(hash_idx))
                 else:
                     for k in range(self.config_sampler.n_configs):
@@ -466,6 +466,68 @@ class GSTrainer(BaseTrainer):
 
         return batch_data, batch_n_segs, batch_other, segs_to_train
 
+    @torch.no_grad()
+    def _update_hetable(self) -> None:
+        self.logger.info("Update HistoryEmbTable for all entries...")
+        self.model.eval()
+
+        for batch_data in self.train_loader:
+            batch_data_list = batch_data.to_data_list()
+            for i, g in enumerate(batch_data_list):
+                seg_ptr, n_segs, n_configs = g.seg_ptr, g.n_segs.item(), g.n_configs.item()
+                n, m = g.n_nodes.item(), g.n_edges.item()
+                hash_head = g.hash_head.item()
+                g.node_config_feat = g.node_config_feat.view(n_configs, -1, NODE_CONFIG_FEAT_DIM)
+                g.adj = SparseTensor(row=g.edge_index[0], col=g.edge_index[1], sparse_sizes=(n, n))
+                for j in range(n_segs):
+                    seg_h, seg_t = seg_ptr[j].item(), seg_ptr[j + 1].item()
+                    seg_size = seg_t - seg_h
+
+                    g_seg = copy.copy(g)
+                    for field, v in g:
+                        if isinstance(v, Tensor) and v.size(0) == n:
+                            # Narrow node-level attr
+                            g_seg[field] = v.narrow(0, seg_h, seg_size)
+                        else:
+                            g_seg[field] = v
+                    adj = g_seg.adj.narrow(0, seg_h, seg_size).narrow(1, seg_h, seg_size)
+                    row, col, _ = adj.coo()
+                    g_seg.edge_index = torch.stack([row, col], dim=0)
+
+                    batch_data = []
+                    for k in range(n_configs):
+                        # Construct data sample for each seg-config pair
+                        node_config_feat_k = g.node_config_feat[k, ...]  # (nc, 18)
+                        node_config_feat_full = torch.zeros(n, NODE_CONFIG_FEAT_DIM, dtype=torch.float32)
+                        node_config_feat_full[g.node_config_ids] += node_config_feat_k
+                        g_seg_config = Data(
+                            edge_index=g_seg.edge_index,
+                            node_feat=g_seg.node_feat,
+                            node_opcode=g_seg.node_opcode,
+                            node_config_feat=node_config_feat_full.narrow(0, seg_h, seg_size),
+                            n_nodes=seg_size,
+                        )
+                        batch_data.append(g_seg_config)
+                        if (k + 1) % 1024 == 0:
+                            batch_data = Batch.from_data_list(batch_data).to(self.device)
+                            _, x_graph = self.model(batch_data)
+                            for inner_k, seg_emb_entry in zip(range(k + 1 - 1024, k + 1), x_graph):
+                                hash_idx = [hash_head + j, inner_k]
+                                self.hetable.push(seg_emb_entry, hash_idx)
+                            batch_data = []
+                    if len(batch_data) > 0:
+                        n_remains = len(batch_data)
+                        batch_data = Batch.from_data_list(batch_data).to(self.device)
+                        _, x_graph = self.model(batch_data)
+                        for inner_k, seg_emb_entry in zip(range(n_configs - n_remains, n_configs), x_graph):
+                            hash_idx = [hash_head + j, inner_k]
+                            self.hetable.push(seg_emb_entry, hash_idx)
+
+            # Randomly update one batch only
+            non_zero_ratio = (self.hetable.emb != 0).sum().item() / self.hetable.table_size
+            self.logger.info(f"--> Non-zero ratio of HistoryEmbTable: {non_zero_ratio}")
+            break
+
 
 class _ConfigSampler(object):
     """Configuration sampler.
@@ -477,14 +539,16 @@ class _ConfigSampler(object):
         self.n_configs = n_configs
         self.include_extremes = include_extremes
 
-    def sample(self, batch: Batch) -> Tuple[Batch, List[Tensor]]:
+    def sample(self, batch: Batch, ep: int = 0) -> Tuple[Batch, List[Tensor]]:
         batch_data_list = batch.to_data_list()
         processed_batch_list = []
         batch_sampled_config_idx = []
         for i, g in enumerate(batch_data_list):
-            # print(f"Sample graph{i}... with #configs = {g.n_configs}, #segs = {g.n_segs}")
             n_nodes, n_config_nodes, n_configs = g.n_nodes.item(), g.n_config_nodes.item(), g.n_configs.item()
-            sampled_config_idx = torch.randint(0, n_configs, (self.n_configs,))
+            if self.include_extremes:
+                sampled_config_idx = self._sample_configs_with_extremes(n_configs, g.y, ep)
+            else:
+                sampled_config_idx = torch.randint(0, n_configs, (self.n_configs,))
 
             # Narrow attributes along config dimension
             g.y = g.y[sampled_config_idx]
@@ -503,3 +567,33 @@ class _ConfigSampler(object):
         batch_sampled_config_idx = torch.cat(batch_sampled_config_idx, dim=0)
 
         return processed_batch, batch_sampled_config_idx
+
+    def _sample_configs_with_extremes(self, n_configs: int, runtime: Tensor, ep: int = 0) -> Tensor:
+        """Sample random configurations with extreme cases.
+
+        Configurations with fastest/slowest runtimes must be included.
+        """
+        if n_configs <= self.n_configs:
+            # ===
+            # Avoid dup sampling???
+            # But the n_configs shape of y becomes mismatched
+            sampled_config_idx = torch.randint(0, n_configs, (self.n_configs,))
+            # ===
+        else:
+            # base = 2**(math.ceil(ep / 3))
+            split_tmp = self.n_configs // 3
+            sorted_runtime_idx = torch.argsort(runtime)
+            n_extremes = 2 * split_tmp
+            middle = sorted_runtime_idx[split_tmp:-split_tmp][torch.randperm(n_configs - n_extremes)][
+                : self.n_configs - n_extremes
+            ]
+            sampled_config_idx = torch.cat(
+                [
+                    sorted_runtime_idx[:split_tmp],  # Fastest
+                    sorted_runtime_idx[-split_tmp:],  # Slowest
+                    middle,  # Middle cases
+                ],
+                dim=0,
+            )
+
+        return sampled_config_idx
