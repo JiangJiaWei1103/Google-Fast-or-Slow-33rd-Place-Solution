@@ -5,12 +5,16 @@ Author: JiaWei Jiang
 This script is used to run training and evaluation processes given the
 specified CV scheme. Moreover, evaluation on unseen (test) data is
 optional.
+
+* [ ] Extend to multiple folds?
 """
 import gc
 import math
 import os
 import warnings
 from argparse import Namespace
+
+import pandas as pd
 
 import wandb
 from base.base_trainer import BaseTrainer
@@ -45,13 +49,14 @@ def main(args: Namespace) -> None:
         coll = exp.dp_cfg["coll"]
 
         # Prepare data
-        # dp = DataProcessor(**exp.dp_cfg["dp"])
-        # dp.run_before_splitting()
-        # data = dp.get_data_cv()
+        src, search = coll.split("-")
+        data = pd.read_pickle(f"./data/processed/layout/{src}/{search}/train_new.pkl")
+        fold_col = "strat_f5_s42_y_mean_log"
+        data_tr, data_val = data[data[fold_col] != 3].reset_index(drop=True), data[data[fold_col] == 3].reset_index(
+            drop=True
+        )
 
         # Run CV (support only train/val split now)
-        # cv = build_cv(**exp.dp_cfg["cv"])
-        # for fold, (tr_idx, val_idx) in enumerate(cv.split(X=data)):
         for fold in range(1):
             # Configure sub-entry for tracking current fold
             if args.use_wandb:
@@ -59,14 +64,16 @@ def main(args: Namespace) -> None:
                     project=args.project_name,
                     group=exp.exp_id,
                     job_type="train_eval",
-                    name=f"fold{fold}",
+                    # name=f"fold{fold}",
+                    name=f"seed{args.seed_num}",
                 )
-            exp.log(f"\n== Train and Eval Process - Fold{fold} ==")
+            # exp.log(f"\n== Train and Eval Process - Fold{fold} ==")
+            exp.log(f"\n== Train and Eval Process - Seed{args.seed_num} ==")
 
             # Build dataloaders
-            # data_tr, data_val = data.iloc[tr_idx].reset_index(drop=True), data.iloc[val_idx].reset_index(drop=True)
-            # data_tr, data_val, scalers = dp.run_after_splitting(data_tr, data_val)
             train_loader, val_loader = build_layout_dataloaders(
+                data_tr,
+                data_val,
                 coll,
                 test=False,
                 **exp.proc_cfg["dataloader"],
@@ -145,12 +152,14 @@ def main(args: Namespace) -> None:
             # if scalers is not None:
             # exp.dump_trafo(scalers, f"fold{fold}")
             for model_file in os.listdir(ckpt_path):
-                if "fold" in model_file:
+                # if "fold" in model_file:
+                if "seed" in model_file:
                     continue
 
                 model_file_name = model_file.split(".")[0]
                 model_path_src = os.path.join(ckpt_path, model_file)
-                model_path_dst = os.path.join(ckpt_path, f"{model_file_name}_fold{fold}.pth")
+                # model_path_dst = os.path.join(ckpt_path, f"{model_file_name}_fold{fold}.pth")
+                model_path_dst = os.path.join(ckpt_path, f"{model_file_name}_seed{args.seed_num}.pth")
                 os.rename(model_path_src, model_path_dst)
 
             # Free mem.

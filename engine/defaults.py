@@ -56,3 +56,7 @@ class TrainEvalArgParser(BaseArgParser):
             default=True,
             help="if True, training and eval processes are tracked with WandB",
         )
+
+        # ===
+        self.argparser.add_argument("--seed-num", type=int, default=None)
+        # ===

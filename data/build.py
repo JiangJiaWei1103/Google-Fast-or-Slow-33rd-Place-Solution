@@ -66,6 +66,8 @@ from torch_geometric.loader.dataloader import DataLoader  # noqa
 
 
 def build_layout_dataloaders(
+    data_tr: pd.DataFrame,
+    data_val: pd.DataFrame,
     coll: str,
     test: bool,
     batch_size: int,
@@ -89,7 +91,7 @@ def build_layout_dataloaders(
     """
     if not test:
         train_loader = DataLoader(
-            LayoutDataset(**{**dataset_cfg, "coll": f"{coll}-train"}),  # type: ignore
+            LayoutDataset(data_tr, **{**dataset_cfg, "coll": f"{coll}-train"}),  # type: ignore
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
@@ -98,8 +100,8 @@ def build_layout_dataloaders(
         train_loader = None
     split = "valid" if not test else "test"
     eval_loader = DataLoader(
-        LayoutDataset(**{**dataset_cfg, "coll": f"{coll}-{split}"}),  # type: ignore
-        batch_size=batch_size,
+        LayoutDataset(data_val, **{**dataset_cfg, "coll": f"{coll}-{split}"}),  # type: ignore
+        batch_size=1,
         shuffle=False,
         num_workers=num_workers,
     )
