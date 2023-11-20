@@ -5,12 +5,12 @@ Author: JiaWei Jiang
 This file contains the basic logic of building loss criterion for
 training and evaluation processes.
 """
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import torch.nn as nn
 from torch.nn.modules.loss import _Loss
 
-from .custom import ListMLE, MultiElementRankLoss, PairwiseHingeLoss
+from .custom import MTL, ListMLE, MultiElementRankLoss, PairwiseHingeLoss
 
 
 def build_criterion(**loss_params: Any) -> Optional[_Loss]:
@@ -27,6 +27,16 @@ def build_criterion(**loss_params: Any) -> Optional[_Loss]:
     Return:
         criterion: loss criterion
     """
+
+    def _parse_mtl(loss_fn: str) -> Dict[str, float]:
+        loss_fn_with_wt = loss_fn.split(",")
+        loss_name2wt = {}
+        for loss_str in loss_fn_with_wt:
+            loss_name, wt = loss_str.split(":")
+            loss_name2wt[loss_name] = float(wt)
+
+        return loss_name2wt
+
     # Setup configuration
     loss_fn = loss_params["name"]
 
@@ -41,6 +51,9 @@ def build_criterion(**loss_params: Any) -> Optional[_Loss]:
         criterion = MultiElementRankLoss()
     elif loss_fn == "listmle":
         criterion = ListMLE()
+    elif "," in loss_fn:
+        loss_name2wt = _parse_mtl(loss_fn)
+        criterion = MTL(loss_name2wt)
     elif loss_fn == "mtk":
         print("Loss criterion default building is disabled...")
         criterion = None
