@@ -20,13 +20,13 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from torch_geometric.data import Batch
-from torch_geometric.nn.conv import GATv2Conv, GPSConv, SAGEConv
+from torch_geometric.nn.conv import GATv2Conv, GINConv, GPSConv, ResGatedGraphConv, SAGEConv
 from torch_geometric.nn.pool import global_max_pool, global_mean_pool
 
 from metadata import N_OPS, NODE_CONFIG_FEAT_DIM
 
 
-class LayoutEarlyJoinGConv(nn.Module):
+class Exp(nn.Module):
     """Graph convolutional model with early-join config features.
 
     For layouts, config features are at the node-level; hence, there's
@@ -54,21 +54,27 @@ class LayoutEarlyJoinGConv(nn.Module):
         n_layers: int = 3,
         gconv_type: str = "SAGEConv",
         h_dim: int = 64,
+        bidir: bool = False,
         dropout: Optional[float] = None,
         sed_dropout: Optional[float] = None,
         sed_fix_eta: bool = False,
-        y_mean: float = 0,
     ) -> None:
-        super(LayoutEarlyJoinGConv, self).__init__()
+        super(Exp, self).__init__()
 
         # Network parameters
         cat_dim = node_feat_dim + shape_ele_type_emb_dim + op_emb_dim + NODE_CONFIG_FEAT_DIM
         out_dim = 1
+        self.bidir = bidir
 
         # Model blocks
         self.op_emb = nn.Embedding(N_OPS, op_emb_dim)
         self.shape_ele_type_emb = nn.Embedding(n_shape_ele_types, shape_ele_type_emb_dim)
-        self.lin = nn.Sequential(nn.Linear(cat_dim, h_dim * 2), nn.ReLU())
+        self.lin = nn.Sequential(
+            nn.Linear(cat_dim, h_dim * 2),
+            nn.ReLU(),
+            nn.Linear(h_dim * 2, h_dim * 2),
+            nn.ReLU(),
+        )
         self.gnn_layers = nn.ModuleList()
         for layer in range(n_layers):
             in_dim = h_dim * 2 if layer == 0 else h_dim
@@ -81,6 +87,10 @@ class LayoutEarlyJoinGConv(nn.Module):
                 gnn_layer = GPSConv(
                     in_dim, SAGEConv(in_dim, h_dim * 2, normalize=True, project=True), attn_type="performer"
                 )
+            elif gconv_type == "GINConv":
+                gnn_layer = GINConv(nn.Sequential(nn.Linear(in_dim, h_dim), nn.ReLU()), train_eps=True)
+            elif gconv_type == "ResGatedGraphConv":
+                gnn_layer = ResGatedGraphConv(in_dim, h_dim)
             self.gnn_layers.append(gnn_layer)
         if gconv_type == "GPSConv":
             h_dim = h_dim * 2
@@ -89,6 +99,10 @@ class LayoutEarlyJoinGConv(nn.Module):
             self.sed = StaleEmbDropout(sed_dropout, sed_fix_eta)
         else:
             self.sed = None
+        if dropout is None:
+            self.dropout = None
+        else:
+            self.dropout = nn.Dropout(dropout)
 
     def forward(
         self,
@@ -110,15 +124,20 @@ class LayoutEarlyJoinGConv(nn.Module):
         inputs.x = x
 
         # GNN layers
+        if self.bidir:
+            edge_index_t = inputs.edge_index[[1, 0], :]
+            inputs.edge_index = torch.cat([inputs.edge_index, edge_index_t], dim=1)
         for _, gnn_layer in enumerate(self.gnn_layers):
-            inputs.x = gnn_layer(inputs.x, inputs.edge_index)  # (BN, h_dim)
+            h = gnn_layer(inputs.x, inputs.edge_index)  # (BN, h_dim)
+            if self.dropout is not None:
+                h = self.dropout(h)
+            inputs.x = h
 
         # Pool to sub-graph context
         x_graph = global_max_pool(inputs.x, inputs.batch) + global_mean_pool(inputs.x, inputs.batch)
         x_graph = x_graph / torch.norm(x_graph, dim=-1, keepdim=True)
 
         # Prediction head
-        # output_reg = self.reg_head(x_graph)
         x_graph = self.layer_post_mp(x_graph)  # (BC, out_dim), out_dim=1
 
         # Apply SED and get the global graph context

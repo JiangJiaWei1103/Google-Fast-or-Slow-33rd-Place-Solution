@@ -13,7 +13,9 @@ from typing import Any, Dict
 
 from torch.nn import Module
 
-from .baseline.Baseline import LateJoinSAGE
+from .baseline.Baseline import EarlyJoinGConv, LateJoinGAT, LateJoinGConv
+from .baseline.LayoutBaseline import LayoutEarlyJoinGConv
+from .exp.Exp2 import Exp
 
 
 def build_model(model_name: str, model_cfg: Dict[str, Any]) -> Module:
@@ -27,8 +29,16 @@ def build_model(model_name: str, model_cfg: Dict[str, Any]) -> Module:
         model: model instance
     """
     model: Module
-    if model_name == "LateJoinSAGE":
-        model = LateJoinSAGE(**model_cfg)
+    if model_name == "EarlyJoinGConv":
+        model = EarlyJoinGConv(**model_cfg)
+    elif model_name == "LateJoinGConv":
+        model = LateJoinGConv(**model_cfg)
+    elif model_name == "LateJoinGAT":
+        model = LateJoinGAT(**model_cfg)
+    elif model_name == "LayoutEarlyJoinGConv":
+        model = LayoutEarlyJoinGConv(**model_cfg)
+    elif model_name == "Exp2":
+        model = Exp(**model_cfg)
     else:
         raise RuntimeError(f"{model_name} isn't registered.")
 

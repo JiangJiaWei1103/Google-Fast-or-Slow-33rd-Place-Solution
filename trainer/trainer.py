@@ -16,6 +16,7 @@ inherited from `BaseTrainer`.
 """
 import copy
 import gc
+from collections import defaultdict
 from logging import Logger
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -276,17 +277,29 @@ class GSTrainer(BaseTrainer):
         )
 
         # Historical embedding table
-        self.hetable = HistoryEmbTable(self.train_loader.dataset.tot_n_segs)
+        self.hetable_update_freq = self.proc_cfg["gst"]["hetable"]["update_freq"]
+        if self.hetable_update_freq is not None:
+            self.hetable = HistoryEmbTable(self.train_loader.dataset.tot_n_segs)
+        else:
+            self.hetable = None
 
-    def _train_epoch(self) -> float:
+        self._iter = 1
+
+    def _train_epoch(self) -> Union[Dict[str, float], float]:
         """Run training process for one epoch.
 
         Return:
             train_loss_avg: average training loss over batches
         """
-        train_loss_total = 0
+        train_loss_total = defaultdict(float)  # type: ignore
 
         self.model.train()
+
+        if self.hetable_update_freq == -2:
+            self.logger.info("Initialize HET with pretrained model forward pass...")
+            self._update_hetable()
+            self.hetable_update_freq = -1
+
         for i, batch_data in enumerate(tqdm(self.train_loader)):
             if i % self.grad_accum_steps == 0:
                 self.optimizer.zero_grad(set_to_none=True)
@@ -298,13 +311,19 @@ class GSTrainer(BaseTrainer):
             )
 
             # Forward pass
-            output, x_graph = self.model(batch_to_train, batch_other, batch_n_segs)
+            output, x_graph = self.model(batch_to_train, batch_other, batch_n_segs, self._iter)
+            # output, output_reg, x_graph = self.model(batch_to_train, batch_other, batch_n_segs)
 
             # Derive loss
             output = output.view(-1, self.config_sampler.n_configs)  # (n_graphs, n_configs)
             y = y.view(-1, self.config_sampler.n_configs)
-            loss = self.loss_fn(output, y)
-            train_loss_total += loss.item()
+            loss = self.loss_fn(output, y)  # , output_reg.view(-1, self.config_sampler.n_configs))
+            if isinstance(loss, dict):
+                for loss_name, loss_val in loss.items():
+                    train_loss_total[loss_name] += loss_val.item()
+            else:
+                train_loss_total["loss"] += loss.item()
+            # loss = loss["loss"]
             loss = loss / self.grad_accum_steps
 
             # Backpropagation
@@ -316,22 +335,46 @@ class GSTrainer(BaseTrainer):
                     self.lr_skd.step()
 
             # Push update-to-date segment embedding to hash table
-            batch_data_list = batch_data.to_data_list()
-            n_sampled_configs = self.config_sampler.n_configs
-            seg_embs = x_graph.reshape(-1, n_sampled_configs)
-            for b, seg_emb in enumerate(seg_embs):
-                parent_graph = batch_data_list[b]
-                hash_head = parent_graph.hash_head.item()
-                seg_to_train = segs_to_train[b]
-                for k, seg_emb_entry in enumerate(seg_emb):
-                    hash_idx = [hash_head + seg_to_train, batch_sampled_config_idx[b][k]]
-                    self.hetable.push(seg_emb_entry, hash_idx)
+            if self.hetable is not None:
+                batch_data_list = batch_data.to_data_list()
+                n_sampled_configs = self.config_sampler.n_configs
+                seg_embs = x_graph.reshape(-1, n_sampled_configs)
+                for b, seg_emb in enumerate(seg_embs):
+                    parent_graph = batch_data_list[b]
+                    hash_head = parent_graph.hash_head.item()
+                    seg_to_train = segs_to_train[b]
+                    for k, seg_emb_entry in enumerate(seg_emb):
+                        hash_idx = [hash_head + seg_to_train, batch_sampled_config_idx[b][k]]
+                        self.hetable.push(seg_emb_entry, hash_idx)
+
+            self._iter += 1
 
         # Periodically update HistoryEmbTable
         # Currently for each epoch, update only one batch
-        self._update_hetable()
+        # if (self.hetable_update_freq is not None
+        #    and self.hetable_update_freq != -1
+        #    and self.epoch % self.hetable_update_freq == 0):
+        if (
+            self.hetable_update_freq is not None
+            and self.hetable_update_freq != -1
+            and self.epoch != 0
+            and self.epoch % self.hetable_update_freq == 0
+        ):
+            self._update_hetable()
+            self.logger.info("No freezing for fine-tuning...")
+            # self.logger.info("Freee layers except for layer_post_mp...")
+            # for name, param in list(self.model.named_parameters()):
+            #    if not name.startswith("layer_post_mp"):
+            #        param.requires_grad = False
+            #        self.logger.info(f"{name} frozen!")
+            # self.logger.info("Reset SED dropout to 0.5!")
+            # self.model.sed.dropout = 0.5
 
-        train_loss_avg = train_loss_total / len(self.train_loader)
+        train_loss_avg = defaultdict(float)
+        for loss_name, loss_val in train_loss_total.items():
+            if loss_name == "loss":
+                loss_name = "train_loss"
+            train_loss_avg[loss_name] = loss_val / len(self.train_loader)
 
         return train_loss_avg
 
@@ -363,7 +406,7 @@ class GSTrainer(BaseTrainer):
 
             # Forward pass
             try:
-                _, x_graph = self.model(batch_to_eval)  # x_graph as output
+                *_, x_graph = self.model(batch_to_eval)  # x_graph as output
             except:
                 x_graph = []
                 n_graphs_tot = batch_to_eval.num_graphs
@@ -374,7 +417,7 @@ class GSTrainer(BaseTrainer):
                     if gt > n_graphs_tot:
                         gt = n_graphs_tot
                     batch_chunk = batch_to_eval[gh:gt]
-                    _, x_graph_chunk = self.model(Batch.from_data_list(batch_chunk))
+                    *_, x_graph_chunk = self.model(Batch.from_data_list(batch_chunk))
                     x_graph.append(x_graph_chunk)
                     gh = gt
                     if gt == n_graphs_tot:
@@ -387,6 +430,7 @@ class GSTrainer(BaseTrainer):
             output_seg = x_graph.reshape(-1, n_sampled_configs)
             output = torch.sum(output_seg, dim=0, keepdim=True)
             loss = self.loss_fn(output, y)
+            # loss = self.loss_fn(output, y, None)["hinge"]
             eval_loss_total += loss.item()
 
             if i == 0:
@@ -419,6 +463,7 @@ class GSTrainer(BaseTrainer):
         segs_to_train = []
         for i, g in enumerate(batch_data_list):
             seg_ptr, n_segs = g.seg_ptr, g.n_segs.item()
+            # seg_id, n_segs = g.seg_id, g.n_segs.item()
             if train:
                 batch_n_segs.extend([n_segs] * self.config_sampler.n_configs)
                 seg_to_train = np.random.randint(n_segs)  # Only one seg is selected, S^(i) = 1
@@ -429,6 +474,8 @@ class GSTrainer(BaseTrainer):
             for j in range(n_segs):
                 seg_h, seg_t = seg_ptr[j].item(), seg_ptr[j + 1].item()
                 seg_size = seg_t - seg_h
+                # seg_idx = torch.where(seg_id == j)[0]
+                # seg_size = len(seg_idx)
 
                 n, m = g.n_nodes.item(), g.n_edges.item()
                 g_seg = copy.copy(g)
@@ -436,17 +483,20 @@ class GSTrainer(BaseTrainer):
                     if isinstance(v, Tensor) and v.size(0) == n:
                         # Narrow node-level attr
                         g_seg[k] = v.narrow(0, seg_h, seg_size)
+                        # g_seg[k] = v[seg_idx]
                     else:
                         g_seg[k] = v
                 adj = g_seg.adj.narrow(0, seg_h, seg_size).narrow(1, seg_h, seg_size)
+                # adj = g_seg.adj[seg_idx, seg_idx]
                 row, col, _ = adj.coo()
                 g_seg.edge_index = torch.stack([row, col], dim=0)
 
                 if train and j != seg_to_train:
-                    for k in range(self.config_sampler.n_configs):
-                        # hash_idx = g.hash_head.item() + n_segs * batch_sampled_config_idx[i][k].item() + j
-                        hash_idx = [g.hash_head.item() + j, batch_sampled_config_idx[i][k]]
-                        batch_other.append(self.hetable.pull(hash_idx))
+                    if self.hetable is not None:
+                        for k in range(self.config_sampler.n_configs):
+                            # hash_idx = g.hash_head.item() + n_segs * batch_sampled_config_idx[i][k].item() + j
+                            hash_idx = [g.hash_head.item() + j, batch_sampled_config_idx[i][k]]
+                            batch_other.append(self.hetable.pull(hash_idx))
                 else:
                     for k in range(self.config_sampler.n_configs):
                         # Construct data sample for each seg-config pair
@@ -471,10 +521,11 @@ class GSTrainer(BaseTrainer):
         self.logger.info("Update HistoryEmbTable for all entries...")
         self.model.eval()
 
-        for batch_data in self.train_loader:
+        for batch_data in tqdm(self.train_loader):
             batch_data_list = batch_data.to_data_list()
             for i, g in enumerate(batch_data_list):
                 seg_ptr, n_segs, n_configs = g.seg_ptr, g.n_segs.item(), g.n_configs.item()
+                # seg_id, n_segs, n_configs = g.seg_id, g.n_segs.item(), g.n_configs.item()
                 n, m = g.n_nodes.item(), g.n_edges.item()
                 hash_head = g.hash_head.item()
                 g.node_config_feat = g.node_config_feat.view(n_configs, -1, NODE_CONFIG_FEAT_DIM)
@@ -482,15 +533,19 @@ class GSTrainer(BaseTrainer):
                 for j in range(n_segs):
                     seg_h, seg_t = seg_ptr[j].item(), seg_ptr[j + 1].item()
                     seg_size = seg_t - seg_h
+                    # seg_idx = torch.where(seg_id == j)[0]
+                    # seg_size = len(seg_idx)
 
                     g_seg = copy.copy(g)
                     for field, v in g:
                         if isinstance(v, Tensor) and v.size(0) == n:
                             # Narrow node-level attr
                             g_seg[field] = v.narrow(0, seg_h, seg_size)
+                            # g_seg[field] = v[seg_idx]
                         else:
                             g_seg[field] = v
                     adj = g_seg.adj.narrow(0, seg_h, seg_size).narrow(1, seg_h, seg_size)
+                    # adj = g_seg.adj[seg_idx, seg_idx]
                     row, col, _ = adj.coo()
                     g_seg.edge_index = torch.stack([row, col], dim=0)
 
@@ -505,12 +560,13 @@ class GSTrainer(BaseTrainer):
                             node_feat=g_seg.node_feat,
                             node_opcode=g_seg.node_opcode,
                             node_config_feat=node_config_feat_full.narrow(0, seg_h, seg_size),
+                            # node_config_feat=node_config_feat_full[seg_idx],
                             n_nodes=seg_size,
                         )
                         batch_data.append(g_seg_config)
                         if (k + 1) % 1024 == 0:
                             batch_data = Batch.from_data_list(batch_data).to(self.device)
-                            _, x_graph = self.model(batch_data)
+                            *_, x_graph = self.model(batch_data)
                             for inner_k, seg_emb_entry in zip(range(k + 1 - 1024, k + 1), x_graph):
                                 hash_idx = [hash_head + j, inner_k]
                                 self.hetable.push(seg_emb_entry, hash_idx)
@@ -518,7 +574,7 @@ class GSTrainer(BaseTrainer):
                     if len(batch_data) > 0:
                         n_remains = len(batch_data)
                         batch_data = Batch.from_data_list(batch_data).to(self.device)
-                        _, x_graph = self.model(batch_data)
+                        *_, x_graph = self.model(batch_data)
                         for inner_k, seg_emb_entry in zip(range(n_configs - n_remains, n_configs), x_graph):
                             hash_idx = [hash_head + j, inner_k]
                             self.hetable.push(seg_emb_entry, hash_idx)
@@ -526,7 +582,7 @@ class GSTrainer(BaseTrainer):
             # Randomly update one batch only
             non_zero_ratio = (self.hetable.emb != 0).sum().item() / self.hetable.table_size
             self.logger.info(f"--> Non-zero ratio of HistoryEmbTable: {non_zero_ratio}")
-            break
+            # break
 
 
 class _ConfigSampler(object):
