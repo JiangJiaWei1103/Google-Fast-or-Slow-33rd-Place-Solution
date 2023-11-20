@@ -1,0 +1,27 @@
+# Configuration for data processing
+
+# ==Metadata==
+coll: nlp-random
+
+# ==Data Processing==
+dp:
+    # {"minmax", null}
+    # Currently support scaling node and cfg feat
+    scaling: null
+
+# ==CV Scheme==
+cv:
+  #scheme: kf
+  #n_folds: 5
+  #random_state: 42
+
+# ==Dataset==
+dataset:
+    # {"target", "target_norm"}
+    # Select "target_norm" for regression loss
+    target_col: target
+
+    # For layout only
+    node_feat_col: node_feat
+    max_seg_size: 1000
+    max_n_configs_to_train: 2000

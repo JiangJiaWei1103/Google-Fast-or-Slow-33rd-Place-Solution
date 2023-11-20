@@ -1,0 +1,103 @@
+# Common configuration for training and evaluation processes
+# ==Training==
+seed: 3407
+device: 'cuda:0'
+epochs: 100
+loss_fn:
+    # Name of the loss criterion, the choices are as follows:
+    #    {'l1', 'l2', 'mtk'}
+    name: "hinge"
+    # Multitask coordination
+    mtk:
+        # Supervised task
+        #supr: 'l1'
+        # Regularization
+        #ae_recons: 0
+        #vq: 0
+    rescale: #True
+# Model checkpoint
+model_ckpt:
+    # opa-max follows the paper implementation
+    ckpt_metric: opa
+    ckpt_mode: max
+    best_ckpt_mid: last
+# ES should be here
+# Graph segment training
+gst:
+    # Configuration sampler
+    config_sampler:
+        n_configs: 160
+        include_extremes: False # True Seems too optimistic
+    # Historical embedding table
+    hetable:
+        # Set -1 to disable updating and null to disable HistoryEmbTable
+        update_freq: 1
+
+# ==DataLoader==
+dataloader:
+    batch_size: 2
+    shuffle: True
+    num_workers: 0
+
+# ==Solver==
+solver:
+    # ==Optimizer==
+    optimizer:
+        name: adamw
+        # Learning rate
+        lr: 0.001
+        # Weight decay, default=1e-2 for AdamW
+        weight_decay: 0.01 #0.0001 #0.00001 #0.01 #0.0001
+        # ==Ada* series==
+        # Term added to the denominator to improve numerical stability
+        eps: 1e-8
+        # ==Adadelta==
+        # Coefficient used for computing a running avg of squared gradients
+        rho: null
+        # ==Adagrad==
+        # Learning rate decay
+        lr_decay: null
+        # ==Adam* series==
+        # Coefficients used for computing running avg of grad and its square
+        beta1: 0.9
+        beta2: 0.999
+        #  Whether to use the AMSGrad variant
+        amsgrad: False
+        # ==SGD==
+        # Momentum factor
+        momentum: null
+        # Dampening for momentum
+        dampening: null
+        # Enable Nesterov momentum
+        nesterov: null
+
+        # Gradient accumulation
+        grad_accum_steps: 16
+
+    # ==Learning rate scheduler==
+    lr_skd:
+        name: cos
+        milestones: null
+        # Multiplicative factor of learning rate decay
+        gamma: null
+
+        T_max: null
+        eta_min: null
+
+        mode: min
+        factor: 0.5
+        patience: 5
+
+        step_per_batch: True
+
+# ==Early Stopping==
+es:
+    patience: 0
+    mode: null # 'min'
+
+# ==Evaluator==
+evaluator:
+    # Evaluation metrics, the choices are as follows:
+    #     {"one_minus_slowdown", "ndcg" (support k = 10 now), "opa", "kendall_tau"}
+    # eval_metrics: ["opa", one_minus_slowdown", "ndcg"]
+    eval_metrics: ["opa", "kendall_tau"]
