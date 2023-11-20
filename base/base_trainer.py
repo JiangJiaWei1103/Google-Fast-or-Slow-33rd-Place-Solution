@@ -92,6 +92,7 @@ class BaseTrainer:
         """
         best_model, best_y_pred = None, None
         for epoch in range(self.epochs):
+            self.epoch = epoch
             train_loss = self._train_epoch()
             val_loss, val_result, _ = self._eval_epoch(datatype="val")
 
@@ -128,6 +129,36 @@ class BaseTrainer:
         self._log_best_prf(final_prf_report)
 
         return best_model, y_preds
+
+    def train_only(self) -> None:
+        """Run training-only process w/o `_eval_epoch`.
+
+        This is commonly used in full-train mode, in which all of the
+        available training data is fed into the model.
+
+        Return:
+            None
+        """
+        for epoch in range(self.epochs):
+            self.epoch = epoch
+            train_loss = self._train_epoch()
+
+            # Adjust learning rate
+            if self.lr_skd is not None and not self.step_per_batch:
+                if isinstance(self.lr_skd, lr_scheduler.ReduceLROnPlateau):
+                    self.lr_skd.step(train_loss)
+                else:
+                    self.lr_skd.step()
+
+            # Track and log process result
+            self._log_proc(epoch, train_loss)
+            # self.logger.info(f"Epoch{epoch} | Training loss {train_loss:.4f}")
+            # if self.use_wandb:
+            #    wandb.log({"train_loss": train_loss})
+
+            # Save the last ckpt
+            if epoch == self.epochs - 1:
+                self.model_ckpt.save_ckpt(self.model, "last")
 
     def eval(self, proc_id: int, eval_loader: DataLoader, datatype: str) -> Optional[Tensor]:
         """Run evaluation process on the specified dataset.
@@ -201,8 +232,8 @@ class BaseTrainer:
         self,
         epoch: int,
         train_loss: Union[float, Dict[str, float]],
-        val_loss: float,
-        val_result: Dict[str, float],
+        val_loss: Optional[float] = None,
+        val_result: Optional[Dict[str, float]] = None,
         proc_id: Optional[str] = None,
     ) -> None:
         """Log message of training process.
@@ -215,6 +246,8 @@ class BaseTrainer:
             proc_id: identifier of the current process, indicating
                 current fold number, random seed, or dataset id.
         """
+        proc_msg = f"Epoch{epoch} | "
+
         # Construct training loss message
         train_loss_msg = ""
         if isinstance(train_loss, float):
@@ -223,22 +256,29 @@ class BaseTrainer:
             for loss_k, loss_v in train_loss.items():
                 loss_name = loss_k.split("_")[0].capitalize()
                 train_loss_msg += f"{loss_name} loss {round(loss_v, 4)} | "
+        proc_msg += train_loss_msg
 
         # Construct eval prf message
-        val_metric_msg = ""
-        for metric, score in val_result.items():
-            val_metric_msg += f"{metric.upper()} {round(score, 4)} | "
+        if val_loss is not None:
+            proc_msg += f"Validation loss {val_loss:.4f} | "
+        if val_result is not None:
+            val_metric_msg = ""
+            for metric, score in val_result.items():
+                val_metric_msg += f"{metric.upper()} {round(score, 4)} | "
+            proc_msg += val_metric_msg
+        self.logger.info(proc_msg)
 
-        self.logger.info(f"Epoch{epoch} | {train_loss_msg} | " f"Validation loss {val_loss:.4f} | {val_metric_msg}")
         if self.use_wandb:
             # Process loss dict and log
             log_dict = train_loss if isinstance(train_loss, dict) else {"train_loss": train_loss}
-            log_dict["val_loss"] = val_loss
+            if val_loss is not None:
+                log_dict["val_loss"] = val_loss
 
             # ===
             # Add metric tracking
-            for metric, score in val_result.items():
-                log_dict[metric] = score
+            if val_result is not None:
+                for metric, score in val_result.items():
+                    log_dict[metric] = score
             # ===
 
             if proc_id is not None:
