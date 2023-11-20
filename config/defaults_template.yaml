@@ -26,10 +26,12 @@ model_ckpt:
 gst:
     # Configuration sampler
     config_sampler:
-        n_configs: 200   # 32 too random``
+        n_configs: 160
         include_extremes: False # True Seems too optimistic
     # Historical embedding table
-    hetable: null
+    hetable:
+        # Set -1 to disable updating and null to disable HistoryEmbTable
+        update_freq: 1
 
 # ==DataLoader==
 dataloader:
