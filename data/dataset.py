@@ -89,31 +89,67 @@ class LayoutDataset(Dataset):
 
     LAYOUT_ROOT: str = os.path.join(PROC_DATA_PATH, "layout")
 
-    def __init__(self, data: pd.DataFrame, coll: str, max_seg_size: int = 1000, **kwargs: Dict[str, Any]) -> None:
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        coll: str,
+        node_feat_col: str = "node_feat",
+        max_seg_size: int = 1000,
+        max_n_configs_to_train: int = 2000,
+        **kwargs: Dict[str, Any],
+    ) -> None:
         super().__init__()
 
         self.data = data
         self.src, self.search, self.split = coll.split("-")
+        self.node_feat_col = node_feat_col
         self.max_seg_size = max_seg_size
+        self.max_n_configs_to_train = max_n_configs_to_train
         self.data_root = os.path.join(self.LAYOUT_ROOT, f"{self.src}/{self.search}/")
 
         split = "test" if self.split == "test" else "train"
         self.node_config_feat_root = os.path.join(self.data_root, f"node_config_feat/{split}")
         self.seg_ptr_map, self.n_segs_map, self.hash_head_map, self.tot_n_segs = self._pre_segment()
+        # self.seg_id_map, self.n_segs_map, self.hash_head_map, self.tot_n_segs = self._pre_segment()
+        if split == "train":
+            self.sampled_configs = self._pre_sample_configs()
 
     def _pre_segment(self) -> Tuple[Dict[int, Tensor], Dict[int, int], Dict[int, int], int]:
         seg_ptr_map, n_segs_map, hash_head_map = {}, {}, {}
+        # seg_id_map, n_segs_map, hash_head_map = {}, {}, {}
         n_segs_accum = 0
         for i, data_row in self.data.iterrows():
             n_nodes = data_row["n_nodes"]
+
             seg_ptr = self._segment(n_nodes)
-            n_segs = len(seg_ptr) - 1
             seg_ptr_map[i] = seg_ptr
+            # seg_id_map[i] = torch.tensor(data_row[f"metis_{self.max_seg_size}"], dtype=torch.int32)
+
+            n_segs = len(seg_ptr) - 1
+            # n_segs = data_row[f"n_segs_{self.max_seg_size}"]
+
             n_segs_map[i] = torch.tensor(n_segs, dtype=torch.int32)
             hash_head_map[i] = torch.tensor(n_segs_accum, dtype=torch.int32)
             n_segs_accum += n_segs
 
+            # if i == 0:
+            # print(data_row[f"metis_{self.max_seg_size}"], "checked.")
+
         return seg_ptr_map, n_segs_map, hash_head_map, n_segs_accum
+
+    # return seg_id_map, n_segs_map, hash_head_map, n_segs_accum
+
+    def _pre_sample_configs(self) -> Dict[int, np.ndarray]:
+        sampled_configs = {}
+        for i, data_row in self.data.iterrows():
+            n_configs = len(data_row["config_runtime"])
+            if n_configs > self.max_n_configs_to_train:
+                sampled_idx = np.random.choice(np.arange(n_configs), self.max_n_configs_to_train, replace=False)
+            else:
+                sampled_idx = np.arange(n_configs)
+            sampled_configs[i] = sampled_idx
+
+        return sampled_configs
 
     def __len__(self) -> int:
         return len(self.data)
@@ -121,11 +157,19 @@ class LayoutDataset(Dataset):
     def __getitem__(self, idx: int) -> BaseData:
         data_row = self.data.iloc[idx]
         node_config_feat = np.load(os.path.join(self.node_config_feat_root, data_row["file"]))["node_config_feat"]
+        if self.split != "test":
+            node_config_feat = node_config_feat[self.sampled_configs[idx]]
 
         # Parse data fields
-        node_feat = torch.tensor(data_row["node_feat"], dtype=torch.float32)
+        node_feat = torch.tensor(data_row[self.node_feat_col], dtype=torch.float32)
         node_opcode = torch.tensor(data_row["node_opcode"], dtype=torch.int32)
         edge_index = torch.tensor(data_row["edge_index"].T, dtype=torch.long)
+
+        drop_edge_mask = torch.empty(edge_index.shape[1], dtype=torch.float32)
+        drop_edge_mask = drop_edge_mask.fill_(0.5)
+        drop_edge_mask = torch.bernoulli(drop_edge_mask)
+        edge_index = edge_index[:, torch.where(drop_edge_mask == 1)[0]]
+
         node_config_feat = torch.tensor(node_config_feat, dtype=torch.float32)
         node_config_ids = torch.tensor(data_row["node_config_ids"])
 
@@ -146,12 +190,13 @@ class LayoutDataset(Dataset):
             n_configs=n_configs,  # c
             n_config_nodes=n_config_nodes,  # nc
             seg_ptr=self.seg_ptr_map[idx],
+            # seg_id=self.seg_id_map[idx], # (n, )
             n_segs=self.n_segs_map[idx],
             hash_head=self.hash_head_map[idx],  # torch.tensor(idx, dtype=torch.int32),
         )
 
         if self.split != "test":
-            runtime = torch.tensor(data_row["config_runtime"])  # (c, )
+            runtime = torch.tensor(data_row["config_runtime"][self.sampled_configs[idx]], dtype=torch.float32)  # (c, )
             data_sample.y = np.log1p(runtime)
 
         return data_sample

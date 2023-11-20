@@ -41,7 +41,8 @@ def tile_collate(batch: List[Any], *, collate_fn_map: Optional[Any] = None) -> D
         "config_feat": torch.float32,
         "target": torch.float32,
     }.items():
-        batch_collated[field] = torch.cat(batch_collated[field], dim=0).to(dtype=dtype)
+        if field in batch_collated:
+            batch_collated[field] = torch.cat(batch_collated[field], dim=0).to(dtype=dtype)
     batch_collated["batch"] = torch.cat(batch_vec, dim=-1).long()
     batch_collated["n_configs"] = torch.tensor(n_configs_flat, dtype=torch.int32)
 
