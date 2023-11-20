@@ -28,15 +28,23 @@ class TileDataset(Dataset):
 
     Parameters:
         data: processed data
+        split: data split
     """
 
     def __init__(
         self,
         data: pd.DataFrame,
+        target_col: str,
+        node_feat_col: str = "f86",
+        max_n_configs_to_train: int = 1000,
+        pre_sample: bool = False,
         **kwargs: Any,
-    ):
+    ) -> None:
         self.data = data
-        self.target_col = kwargs["target_col"]
+        self.target_col = target_col
+        self.node_feat_col = node_feat_col
+        self.max_n_configs_to_train = max_n_configs_to_train
+        self.pre_sample = pre_sample
 
         self._n_samples = len(data)
 
@@ -45,24 +53,8 @@ class TileDataset(Dataset):
         else:
             self._infer = False
             self._add_target_to_data()
-
-    def __len__(self) -> int:
-        return self._n_samples
-
-    def __getitem__(self, idx: int) -> Dict[str, Tensor]:
-        data_row = self.data.iloc[idx]
-        data_sample = {
-            "node_feat": torch.tensor(data_row["node_feat"], dtype=torch.float32),
-            "node_opcode": torch.tensor(data_row["node_opcode"], dtype=torch.int32),
-            "edge_index": torch.tensor(data_row["edge_index"], dtype=torch.long),
-            "config_feat": torch.tensor(data_row["config_feat"], dtype=torch.float32),
-        }
-
-        # Add target
-        if not self._infer:
-            data_sample["target"] = torch.tensor(data_row[self.target_col], dtype=torch.float32)
-
-        return data_sample
+            if pre_sample:
+                self.sampled_configs = self._pre_sample_configs()
 
     def _add_target_to_data(self) -> None:
         target = []
@@ -71,12 +63,65 @@ class TileDataset(Dataset):
             runtime = r["config_runtime"] / (r["config_runtime_normalizers"] + EPS)
             target.append(runtime)
 
+            # Or take log, see y range
+
             # Normalize
             runtime_norm = (runtime - np.mean(runtime)) / (np.std(runtime) + EPS)
             target_norm.append(runtime_norm)
 
         self.data["target"] = target
         self.data["target_norm"] = target_norm
+
+    def _pre_sample_configs(self) -> Dict[int, np.ndarray]:
+        sampled_configs = {}
+        for i, data_row in self.data.iterrows():
+            sampled_configs[i] = self._sample_configs(data_row["n_configs"])
+
+        return sampled_configs
+
+    def __len__(self) -> int:
+        return self._n_samples
+
+    def __getitem__(self, idx: int) -> BaseData:
+        data_row = self.data.iloc[idx]
+
+        # if self.split == "train":
+        if not self._infer:
+            if self.pre_sample:
+                sampled_configs = self.sampled_configs[idx]
+            else:
+                sampled_configs = self._sample_configs(data_row["n_configs"])
+
+        if not self._infer:  # self.split == "train":
+            config_feat = data_row["config_feat"][sampled_configs]
+        else:
+            config_feat = data_row["config_feat"]  # (C, CONFIG_FEAT_DIM)
+        data_sample = Data(
+            node_feat=torch.tensor(data_row[self.node_feat_col], dtype=torch.float32),
+            node_opcode=torch.tensor(data_row["node_opcode"], dtype=torch.int32),
+            edge_index=torch.tensor(data_row["edge_index"].T, dtype=torch.long),
+            config_feat=torch.tensor(config_feat, dtype=torch.float32),
+            n_nodes=torch.tensor(data_row["n_nodes"], dtype=torch.int32),
+            n_configs=torch.tensor(data_row["n_configs"], dtype=torch.int32),
+        )
+
+        # Add target
+        if not self._infer:
+            y = data_row[self.target_col]
+            # if self.split == "train":
+            data_sample.y = torch.tensor(y[sampled_configs], dtype=torch.float32).reshape(1, -1)
+            # else:
+            # data_sample.y = torch.tensor(y, dtype=torch.float32)
+
+        return data_sample
+
+    def _sample_configs(self, n_configs: int) -> np.ndarray:
+        if n_configs > self.max_n_configs_to_train:
+            sampled_idx = np.random.choice(np.arange(n_configs), self.max_n_configs_to_train, replace=False)
+        else:
+            sampled_idx = np.random.randint(n_configs, size=self.max_n_configs_to_train)
+
+        return sampled_idx
 
 
 class LayoutDataset(Dataset):

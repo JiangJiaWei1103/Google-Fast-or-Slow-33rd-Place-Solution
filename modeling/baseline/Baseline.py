@@ -14,15 +14,109 @@ Commonly used notations are defined as follows:
 * `BM`: #edges in one batch
 * `BC`: #configurations in one batch
 """
-from typing import Dict
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
 from torch import Tensor
+from torch_geometric.data import Batch
 from torch_geometric.nn.pool import global_add_pool, global_max_pool, global_mean_pool
 
 from metadata import CONFIG_FEAT_DIM, N_OPS, NODE_FEAT_DIM
 from modeling.layers import _GNNLayer
+
+
+class TileEarlyJoinGConv(nn.Module):
+    """Graph convolutional model with early-join config features.
+
+    For tile, config feature is at the graph-level, which will be
+    broadcasted to each node.
+
+    Parameters:
+        node_feat_dim: node feature dimension, excluding the last for
+            shape element type embedding
+        n_shape_ele_types: number of shape element types
+        shape_ele_type_emb_dim: shape element type embedding dimension
+        op_emb_dim: op-code embedding dimension
+        n_layers: number of GNN layers
+        gconv_type: type of graph convolution
+        h_dim: hidden dimension
+        dropout: dropout ratio
+        sed_dropout: dropout ratio of StaleEmbDropout
+    """
+
+    def __init__(
+        self,
+        node_feat_dim: int = 85,
+        n_shape_ele_types: int = 8,
+        shape_ele_type_emb_dim: int = 4,
+        op_emb_dim: int = 32,
+        n_layers: int = 3,
+        gconv_type: str = "SAGEConv",
+        h_dim: int = 64,
+        dropout: Optional[float] = None,
+        sed_dropout: Optional[float] = None,
+    ) -> None:
+        super(TileEarlyJoinGConv, self).__init__()
+
+        # Network parameters
+        cat_dim = node_feat_dim + shape_ele_type_emb_dim + op_emb_dim + CONFIG_FEAT_DIM
+        out_dim = 1
+
+        # Model blocks
+        self.op_emb = nn.Embedding(N_OPS, op_emb_dim)
+        self.shape_ele_type_emb = nn.Embedding(n_shape_ele_types, shape_ele_type_emb_dim)
+        self.lin = nn.Sequential(nn.Linear(cat_dim, h_dim * 2), nn.ReLU(), nn.Linear(h_dim * 2, h_dim * 2), nn.ReLU())
+        self.gnn_layers = nn.ModuleList()
+        for layer in range(n_layers):
+            in_dim = h_dim * 2 if layer == 0 else h_dim
+            if gconv_type == "SAGEConv":
+                gnn_layer = _GNNLayer(
+                    gconv_type="SAGEConv2D",
+                    in_dim=in_dim,
+                    h_dim=h_dim,
+                    bidir=False,
+                )
+            self.gnn_layers.append(gnn_layer)
+        self.layer_post_mp = nn.Sequential(nn.Linear(h_dim, h_dim // 2), nn.ReLU(), nn.Linear(h_dim // 2, out_dim))
+
+    def forward(
+        self, inputs: Batch, inputs_other: Optional[List[Tensor]] = None, batch_n_segs: Optional[List[int]] = None
+    ) -> Tensor:
+        x_node_feat = inputs.node_feat  # (BN, node_feat_dim+1)
+        x_config_feat = inputs.config_feat.reshape(-1, 1000, CONFIG_FEAT_DIM)  # (B, C, CONFIG_FEAT_DIM)
+        n_nodes = x_node_feat.shape[0]
+        batch_size, n_configs, _ = x_config_feat.shape
+
+        # Categorical embedding
+        x_shape_ele_type = self.shape_ele_type_emb(x_node_feat[:, -1].long())  # (BN, shape_ele_type_emb_dim)
+        x_op = self.op_emb(inputs.node_opcode)  # (BN, op_emb_dim)
+
+        # Fuse node-level features
+        x_node = torch.cat(
+            [x_node_feat[:, :-1], x_shape_ele_type, x_op], dim=-1
+        )  # (BN, node_feat_dim+CONFIG_FEAT_DIM+shape_ele_type_emb_dim)
+        x_node = x_node.unsqueeze(dim=1).expand(-1, n_configs, -1)  # (BN, C, ...)
+        x_config_feat = torch.repeat_interleave(x_config_feat, inputs.n_nodes, dim=0)  # (BN, C, NODE_CONFIG_FEAT_DIM)
+        x = torch.cat([x_node, x_config_feat], dim=-1)  # (BN, C, cat_dim)
+        x = self.lin(x)  # (BN, C, h_dim * 2)
+        inputs.x = x
+
+        # GNN layers
+        for _, gnn_layer in enumerate(self.gnn_layers):
+            h = gnn_layer(inputs.x, inputs.edge_index)  # (BN, C, h_dim)
+            inputs.x = h
+
+        # Pool to sub-graph context
+        x = inputs.x.reshape(n_nodes, -1)
+        x_graph = global_max_pool(x, inputs.batch) + global_mean_pool(x, inputs.batch)  # (B, C * h_dim)
+        x_graph = x_graph.reshape(batch_size, n_configs, -1)
+        x_graph = x_graph / torch.norm(x_graph, dim=-1, keepdim=True)  # (B, C, h_dim)
+
+        # Prediction head
+        output = self.layer_post_mp(x_graph).squeeze(dim=-1)  # (B, C)
+
+        return output
 
 
 class EarlyJoinGConv(nn.Module):
