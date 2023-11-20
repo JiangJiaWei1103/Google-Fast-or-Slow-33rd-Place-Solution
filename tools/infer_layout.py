@@ -4,12 +4,14 @@ Author: JiaWei Jiang
 """
 import copy
 import gc
+import json
 import logging
 import os
 import warnings
 from argparse import Namespace
+from collections import defaultdict
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -23,6 +25,7 @@ from tqdm import tqdm
 
 from base.base_argparser import BaseArgParser
 from data.dataset import LayoutDataset
+from evaluating.evaluator import Evaluator
 from experiment.experiment import Experiment
 from metadata import NODE_CONFIG_FEAT_DIM
 from modeling.build import build_model
@@ -47,11 +50,12 @@ class InferArgParser(BaseArgParser):
         self.argparser.add_argument("--data-split", type=str, default="valid", choices=["train", "valid", "test"])
         self.argparser.add_argument("--model-name", type=str, default=None)
         self.argparser.add_argument("--mid", type=str, default=None)
+        self.argparser.add_argument("--seeds", type=str, nargs="+", default=None)
         self.argparser.add_argument("--use-wandb", type=self._str2bool, help="exists for compatibility", default=False)
 
 
 @torch.no_grad()
-def _run_infer(models: List[Module], dataloader: DataLoader) -> List[Tensor]:
+def _run_infer(models: List[Module], dataloader: DataLoader) -> Tuple[List[Tensor], ...]:
     """Run inference using well-trained models.
 
     Inference is for pure prediction without evaluation.
@@ -63,6 +67,7 @@ def _run_infer(models: List[Module], dataloader: DataLoader) -> List[Tensor]:
     Return:
         y_pred: prediction
     """
+    y_true = []
     y_pred = []
     n_models = len(models)
 
@@ -74,13 +79,11 @@ def _run_infer(models: List[Module], dataloader: DataLoader) -> List[Tensor]:
         # One graph at a time
         g = batch_data.to_data_list()[0]
         seg_ptr, n_segs, n_configs = g.seg_ptr, g.n_segs.item(), g.n_configs.item()
+        # seg_id, n_segs, n_configs = g.seg_id, g.n_segs.item(), g.n_configs.item()
         n, m = g.n_nodes.item(), g.n_edges.item()
         g.node_config_feat = g.node_config_feat.view(n_configs, -1, NODE_CONFIG_FEAT_DIM)  # (c, nc, 18)
         g.adj = SparseTensor(row=g.edge_index[0], col=g.edge_index[1], sparse_sizes=(n, n))
-
-        # if i < 6: continue
-        # Note if node_config_feat construction ruins the origianl config feat source
-        # 看其他地方有沒有不小心替換掉，dim 夠大不一定會報錯
+        y_true.append(g.y)
 
         x_graph = []
         batch_data_infer = []
@@ -96,15 +99,19 @@ def _run_infer(models: List[Module], dataloader: DataLoader) -> List[Tensor]:
             for j in range(n_segs):
                 seg_h, seg_t = seg_ptr[j].item(), seg_ptr[j + 1].item()
                 seg_size = seg_t - seg_h
+                # seg_idx = torch.where(seg_id == j)[0]
+                # seg_size = len(seg_id)
 
                 g_seg = copy.copy(g)
                 for field, value in g:
                     if isinstance(value, Tensor) and value.size(0) == n:
                         # Narrow node-level attr
                         g_seg[field] = value.narrow(0, seg_h, seg_size)
+                        # g_seg[field] = value[seg_idx]
                     else:
                         g_seg[field] = value
                 adj = g_seg.adj.narrow(0, seg_h, seg_size).narrow(1, seg_h, seg_size)
+                # adj = g_seg.adj[seg_idx, seg_idx]
                 row, col, _ = adj.coo()
                 g_seg.edge_index = torch.stack([row, col], dim=0)
 
@@ -119,14 +126,25 @@ def _run_infer(models: List[Module], dataloader: DataLoader) -> List[Tensor]:
                 sample_cnt += 1
                 if sample_cnt % 1024 == 0:
                     batch_data_infer = Batch.from_data_list(batch_data_infer).to(DEVICE)
-                    _, x_graph_ = models[0](batch_data_infer)  # (256, 1)
+                    for mi, model in enumerate(models):
+                        _, x_graph_mi = model(batch_data_infer)  # (256, 1)
+                        if mi == 0:
+                            x_graph_ = x_graph_mi / n_models
+                        else:
+                            x_graph_ += x_graph_mi / n_models
+
                     x_graph.append(x_graph_.detach().cpu())
-                    del batch_data_infer
+                    del batch_data_infer, x_graph_, x_graph_mi
                     gc.collect()
                     batch_data_infer = []
         if len(batch_data_infer) > 0:
             batch_data_infer = Batch.from_data_list(batch_data_infer).to(DEVICE)
-            _, x_graph_ = models[0](batch_data_infer)
+            for mi, model in enumerate(models):
+                _, x_graph_mi = model(batch_data_infer)  # (256, 1)
+                if mi == 0:
+                    x_graph_ = x_graph_mi / n_models
+                else:
+                    x_graph_ += x_graph_mi / n_models
             x_graph.append(x_graph_.detach().cpu())
             del batch_data_infer
             gc.collect()
@@ -136,7 +154,7 @@ def _run_infer(models: List[Module], dataloader: DataLoader) -> List[Tensor]:
         output = torch.sum(output_seg, dim=1)  # (n_configs, )
         y_pred.append(output)
 
-    return y_pred
+    return y_true, y_pred
 
 
 def _gen_sub(data: pd.DataFrame, top_configs: List[str], src: str, search: str) -> pd.DataFrame:
@@ -167,12 +185,18 @@ def main(args: Namespace) -> None:
     src, search = coll.split("-")
     data_split = args.data_split
     mid = args.mid
+    seeds = args.seeds
 
     with experiment as exp:
         # Prepare data
-        data = pd.read_pickle(LAYOUT_PROC_PATH / f"{src}/{search}/{data_split}.pkl")
+        if data_split == "valid":
+            data = pd.read_pickle(LAYOUT_PROC_PATH / f"{src}/{search}/train_new_206.pkl")
+            data = data[data["strat_f5_s42_y_mean_log"] == 3].reset_index(drop=True)
+        else:
+            data = pd.read_pickle(LAYOUT_PROC_PATH / f"{src}/{search}/{data_split}_206.pkl")
+
         dataloader = DataLoader(
-            LayoutDataset(**{**exp.dp_cfg["dataset"], "coll": f"{src}-{search}-{data_split}"}),  # type: ignore
+            LayoutDataset(data, **{**exp.dp_cfg["dataset"], "coll": f"{src}-{search}-{data_split}"}),  # type: ignore
             batch_size=1,
             shuffle=False,
             num_workers=0,
@@ -182,10 +206,11 @@ def main(args: Namespace) -> None:
         exp.log(f"Load model with mid {mid}...")
         model_root = os.path.join(exp.exp_dump_path, "models")
         models = []
-        for model_file in sorted(os.listdir(model_root)):
-            if mid not in model_file:
-                continue
-
+        if seeds is not None:
+            model_files = [f"model-{mid}_seed{seed}.pth" for seed in seeds]
+        else:
+            model_files = [f"model-{mid}.pth"]
+        for model_file in sorted(model_files):
             model = build_model(args.model_name, exp.model_params)
             model.load_state_dict(torch.load(os.path.join(model_root, model_file), map_location=DEVICE))
             model.to(DEVICE)
@@ -194,33 +219,19 @@ def main(args: Namespace) -> None:
         if data_split != "test":
             exp.log(f"== Run Evaluation on {data_split.upper()} Set Using Ckpt {mid} ==")
 
-            y_pred = _run_infer(models, dataloader)
-            for y_pred_, y in zip(y_pred, data["config_runtime"]):
-                print(y_pred_.shape, y.shape)
-            # exp.proc_cfg["gst"] = {
-            #    "config_sampler": {"n_configs": 32, "include_extremes": False},
-            #    "hetable": {"num_embeddings": int(6e7), "embedding_dim": 1}
-            # }
-
-            # trainer = GSTrainer(
-            #    logger=exp.logger,
-            #    proc_cfg=exp.proc_cfg,
-            #    model=models[0],  # CV scheme is train / valid now
-            #    loss_fn=build_criterion(**exp.proc_cfg["loss_fn"]),
-            #    optimizer=None,
-            #    lr_skd=None,
-            #    ckpt_path=model_root,
-            #    es=None,
-            #    evaluator=build_evaluator(eval_metrics=["opa", "kendall_tau"]),
-            #    scaler=None,
-            #    train_loader=None,
-            #    eval_loader=dataloader,
-            #    use_wandb=False
-            # )
-            # trainer.eval(None, dataloader, datatype=data_split)
+            evaluator = Evaluator(metric_names=["opa", "kendall_tau"])
+            y_true, y_pred = _run_infer(models, dataloader)
+            n_samples = len(y_pred)
+            eval_result = defaultdict(float)  # type: ignore
+            for i, (y_pred_i, y_true_i) in enumerate(zip(y_pred, y_true)):
+                eval_result_i = evaluator.evaluate(y_pred_i.reshape(1, -1), y_true_i.reshape(1, -1), None)
+                for eval_metric, score in eval_result_i.items():
+                    eval_result[eval_metric] += score / n_samples
+            exp.log(f">>>>> Evaluation Result Using Ckpt {mid} <<<<<")
+            exp.log(json.dumps(eval_result, indent=4))
         else:
             exp.log(f"== Run Inference on {data_split.upper()} Set Using Ckpt {mid} ==")
-            y_pred = _run_infer(models, dataloader)
+            y_true, y_pred = _run_infer(models, dataloader)
             top_configs = []
             for y_pred_g in y_pred:
                 top_configs_g = np.argsort(y_pred_g.numpy())
