@@ -15,8 +15,9 @@ import warnings
 from argparse import Namespace
 
 import pandas as pd
-
+import torch
 import wandb
+
 from base.base_trainer import BaseTrainer
 from criterion.build import build_criterion
 from data.build import build_layout_dataloaders
@@ -50,7 +51,7 @@ def main(args: Namespace) -> None:
 
         # Prepare data
         src, search = coll.split("-")
-        data = pd.read_pickle(f"./data/processed/layout/{src}/{search}/train_new.pkl")
+        data = pd.read_pickle(f"./data/processed/layout/{src}/{search}/train_new_206.pkl")
         fold_col = "strat_f5_s42_y_mean_log"
         data_tr, data_val = data[data[fold_col] != 3].reset_index(drop=True), data[data[fold_col] == 3].reset_index(
             drop=True
@@ -82,6 +83,9 @@ def main(args: Namespace) -> None:
 
             # Build model
             model = build_model(args.model_name, exp.model_params)
+            if args.pretrained_path is not None:
+                exp.log(f"Load model weights from pretrained ckpt {args.pretrained_path}...")
+                model.load_state_dict(torch.load(args.pretrained_path, map_location=exp.proc_cfg["device"]))
             model.to(exp.proc_cfg["device"])
             if args.use_wandb:
                 wandb.log({"model": {"n_params": count_params(model)}})

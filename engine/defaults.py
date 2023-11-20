@@ -59,4 +59,5 @@ class TrainEvalArgParser(BaseArgParser):
 
         # ===
         self.argparser.add_argument("--seed-num", type=int, default=None)
+        self.argparser.add_argument("--pretrained-path", type=str, default=None)
         # ===
