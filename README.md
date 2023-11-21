@@ -103,5 +103,5 @@ The average score across all data collections are shown as follows,
 | Private LB | 0.62695 |
 
 ## References
-[1] [Learning Large Graph Property Prediction via Graph Segment Training](https://arxiv.org/abs/2305.12322)
+[1] [Learning Large Graph Property Prediction via Graph Segment Training](https://arxiv.org/abs/2305.12322)<br>
 [2] [TpuGraphs: A Performance Prediction Dataset on Large Tensor Computational Graphs](https://arxiv.org/abs/2308.13490)
