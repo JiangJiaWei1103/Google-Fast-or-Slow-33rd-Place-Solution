@@ -2,6 +2,9 @@
 
 > Solution writeup: [33rd Solution Writeup and Discussion on GST](https://www.kaggle.com/competitions/predict-ai-model-runtime/discussion/456579)
 
+## Overview
+In this competition, competitors are challenged to estimate the runtime of DL computational graphs compiled with specific configurations. Concretely, the configurations with shorter runtimes should be ranked to the top. For implementation, I choose to use the off-the-shelf [**G**raph **S**egment **T**raining (**GST**)](https://github.com/kaidic/GST) as the main training framework, aiming at reducing the memory consumption for model training.
+
 ## How to Run
 ### 1. Download Dataset
 You have to follow instructions on the [data tab](https://www.kaggle.com/competitions/predict-ai-model-runtime/data) to download the dataset. Then, you need to unzip and put the raw data under the directory `./data/raw/`. Under `./data/raw/`, the folder structure looks like the follows,
@@ -80,6 +83,7 @@ python -m tools.infer_layout --exp-id <%m%d-%H_%M_%S> --coll <collection> --data
 # --mid               model checkpoint identifier, always choose last to avoid overfitting on validation set
 # --seeds             [0, 1, ...], feel free to ensemble with models trained on different random seeds
 ```
+Then, `submission.csv` is automatically generated under the specified output path `./output/<%m%d-%H_%M_%S>/`.
 
 ### 5. Experimental Results
 The local CV score of my final best result is shown in the following table,
@@ -96,5 +100,8 @@ The average score across all data collections are shown as follows,
 | --- | --- | 
 | CV | 0.64412 | 
 | Public LB | 0.65282 | 
-| Private LB | 0.62695 | 
+| Private LB | 0.62695 |
 
+## References
+[1] [Learning Large Graph Property Prediction via Graph Segment Training](https://arxiv.org/abs/2305.12322)
+[2] [TpuGraphs: A Performance Prediction Dataset on Large Tensor Computational Graphs](https://arxiv.org/abs/2308.13490)
